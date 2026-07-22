@@ -496,14 +496,12 @@ textarea {
   margin: 0;
 }
 
-.room-grid,
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: .75rem;
 }
 
-.room-tile,
 .setting-action {
   border: 1px solid var(--uf-line);
   border-radius: var(--uf-radius);
@@ -630,19 +628,19 @@ textarea {
 }
 
 .transcript-col-subject {
-  width: 44%;
+  width: 34%;
 }
 
-.transcript-col-average {
+.transcript-col-teacher {
+  width: 24%;
+}
+
+.transcript-col-mark {
   width: 16%;
 }
 
-.transcript-col-result {
-  width: 20%;
-}
-
-.transcript-col-mention {
-  width: 20%;
+.transcript-col-appreciation {
+  width: 26%;
 }
 
 .empty-state {

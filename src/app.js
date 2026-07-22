@@ -1,28 +1,750 @@
-import { createSeedDatabase } from './data/seed.js';
-import { formatDate, formatNumber, getDirection, t } from './core/i18n.js';
-import { LocalStorageAdapter } from './core/storage.js';
-import { AcademicService, AuthService, GradeService, ScheduleService, createRepositories, normalizePath } from './core/services.js';
+'use strict';
 
-export const ROUTES = [
+// Data model and mock data
+const DATABASE_VERSION = 3;
+
+const DATABASE_TABLES = {
+  users: ['id', 'displayName', 'email', 'password', 'role', 'linkedProfileId', 'locale', 'avatar', 'status', 'createdAt', 'updatedAt'],
+  filieres: ['id', 'code', 'nameFr', 'nameAr', 'department', 'degreeType', 'durationSemesters', 'status', 'createdAt', 'updatedAt'],
+  semesters: ['id', 'filiereId', 'code', 'labelFr', 'labelAr', 'order', 'startDate', 'endDate', 'status', 'createdAt', 'updatedAt'],
+  subjects: ['id', 'filiereId', 'semesterId', 'code', 'nameFr', 'nameAr', 'coefficient', 'hours', 'status', 'createdAt', 'updatedAt'],
+  teachers: ['id', 'employeeNumber', 'firstNameFr', 'lastNameFr', 'firstNameAr', 'lastNameAr', 'email', 'phone', 'speciality', 'rank', 'status', 'createdAt', 'updatedAt'],
+  teacherAssignments: ['id', 'teacherId', 'filiereId', 'semesterId', 'subjectId', 'academicYear', 'status', 'createdAt', 'updatedAt'],
+  students: ['id', 'registrationNumber', 'firstNameFr', 'lastNameFr', 'firstNameAr', 'lastNameAr', 'email', 'phone', 'birthDate', 'filiereId', 'currentSemesterId', 'status', 'createdAt', 'updatedAt'],
+  timetableEntries: ['id', 'filiereId', 'semesterId', 'subjectId', 'teacherId', 'weekday', 'startTime', 'endTime', 'status', 'createdAt', 'updatedAt'],
+  grades: ['id', 'studentId', 'subjectId', 'semesterId', 'teacherId', 'mark', 'appreciation', 'published', 'gradedAt', 'status', 'createdAt', 'updatedAt'],
+  activityLogs: ['id', 'actorUserId', 'action', 'entityType', 'entityId', 'summary', 'timestamp', 'status', 'createdAt', 'updatedAt']
+};
+
+const now = '2026-07-21T09:00:00.000Z';
+
+function stamp(record) {
+  return {
+    createdAt: now,
+    updatedAt: now,
+    status: record.status ?? 'active',
+    ...record
+  };
+}
+
+function createSeedDatabase() {
+  return structuredClone({
+    version: DATABASE_VERSION,
+    migratedAt: now,
+    users: [
+      stamp({ id: 'user-admin', displayName: 'Admin UniFlow', email: 'admin@uniflow.local', password: 'demo123', role: 'admin', linkedProfileId: null, locale: 'fr', avatar: 'AU' }),
+      stamp({ id: 'user-teacher', displayName: 'Pr. Youssef Alaoui', email: 'teacher@uniflow.local', password: 'demo123', role: 'teacher', linkedProfileId: 'teach-1', locale: 'fr', avatar: 'YA' }),
+      stamp({ id: 'user-student', displayName: 'Mina El Fassi', email: 'student@uniflow.local', password: 'demo123', role: 'student', linkedProfileId: 'stu-1', locale: 'fr', avatar: 'ME' })
+    ],
+    filieres: [
+      stamp({ id: 'fil-gi', code: 'GI', nameFr: 'Génie Informatique', nameAr: 'هندسة المعلوميات', department: 'Sciences et Techniques', degreeType: 'Licence', durationSemesters: 6 }),
+      stamp({ id: 'fil-ma', code: 'MA', nameFr: 'Mathématiques Appliquées', nameAr: 'الرياضيات التطبيقية', department: 'Sciences', degreeType: 'Licence', durationSemesters: 6 })
+    ],
+    semesters: [
+      stamp({ id: 'sem-gi-s3', filiereId: 'fil-gi', code: 'S3', labelFr: 'Semestre 3', labelAr: 'السداسي 3', order: 3, startDate: '2025-09-15', endDate: '2026-01-31' }),
+      stamp({ id: 'sem-gi-s4', filiereId: 'fil-gi', code: 'S4', labelFr: 'Semestre 4', labelAr: 'السداسي 4', order: 4, startDate: '2026-02-10', endDate: '2026-07-15' }),
+      stamp({ id: 'sem-ma-s3', filiereId: 'fil-ma', code: 'S3', labelFr: 'Semestre 3', labelAr: 'السداسي 3', order: 3, startDate: '2025-09-15', endDate: '2026-01-31' })
+    ],
+    subjects: [
+      stamp({ id: 'sub-algo', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', code: 'ALG301', nameFr: 'Algorithmique avancée', nameAr: 'الخوارزميات المتقدمة', coefficient: 2, hours: 48 }),
+      stamp({ id: 'sub-arch', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', code: 'ARC301', nameFr: 'Architecture des ordinateurs', nameAr: 'معمارية الحاسوب', coefficient: 1, hours: 36 }),
+      stamp({ id: 'sub-db', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', code: 'BD302', nameFr: 'Bases de données', nameAr: 'قواعد البيانات', coefficient: 2, hours: 48 }),
+      stamp({ id: 'sub-os', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', code: 'SYS302', nameFr: 'Systèmes d’exploitation', nameAr: 'أنظمة التشغيل', coefficient: 1, hours: 36 }),
+      stamp({ id: 'sub-web', filiereId: 'fil-gi', semesterId: 'sem-gi-s4', code: 'WEB401', nameFr: 'Applications web', nameAr: 'تطبيقات الويب', coefficient: 2, hours: 50 }),
+      stamp({ id: 'sub-analysis', filiereId: 'fil-ma', semesterId: 'sem-ma-s3', code: 'ANA301', nameFr: 'Analyse numérique', nameAr: 'التحليل العددي', coefficient: 2, hours: 48 })
+    ],
+    teachers: [
+      stamp({ id: 'teach-1', employeeNumber: 'ENS-001', firstNameFr: 'Youssef', lastNameFr: 'Alaoui', firstNameAr: 'يوسف', lastNameAr: 'العلوي', email: 'youssef.alaoui@univ.test', phone: '+212600001001', speciality: 'Algorithmique', rank: 'Professeur' }),
+      stamp({ id: 'teach-2', employeeNumber: 'ENS-002', firstNameFr: 'Hajar', lastNameFr: 'Benali', firstNameAr: 'هاجر', lastNameAr: 'بن علي', email: 'hajar.benali@univ.test', phone: '+212600001002', speciality: 'Bases de données', rank: 'Maître de conférences' }),
+      stamp({ id: 'teach-3', employeeNumber: 'ENS-003', firstNameFr: 'Karim', lastNameFr: 'Mansouri', firstNameAr: 'كريم', lastNameAr: 'منصوري', email: 'karim.mansouri@univ.test', phone: '+212600001003', speciality: 'Web', rank: 'Professeur assistant' }),
+      stamp({ id: 'teach-4', employeeNumber: 'ENS-004', firstNameFr: 'Salma', lastNameFr: 'Naciri', firstNameAr: 'سلمى', lastNameAr: 'ناصري', email: 'salma.naciri@univ.test', phone: '+212600001004', speciality: 'Mathématiques', rank: 'Vacataire' })
+    ],
+    teacherAssignments: [
+      stamp({ id: 'assign-1', teacherId: 'teach-1', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', subjectId: 'sub-algo', academicYear: '2025-2026' }),
+      stamp({ id: 'assign-2', teacherId: 'teach-1', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', subjectId: 'sub-arch', academicYear: '2025-2026' }),
+      stamp({ id: 'assign-3', teacherId: 'teach-2', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', subjectId: 'sub-db', academicYear: '2025-2026' }),
+      stamp({ id: 'assign-4', teacherId: 'teach-3', filiereId: 'fil-gi', semesterId: 'sem-gi-s4', subjectId: 'sub-web', academicYear: '2025-2026' }),
+      stamp({ id: 'assign-5', teacherId: 'teach-4', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', subjectId: 'sub-os', academicYear: '2025-2026' }),
+      stamp({ id: 'assign-6', teacherId: 'teach-4', filiereId: 'fil-ma', semesterId: 'sem-ma-s3', subjectId: 'sub-analysis', academicYear: '2025-2026' })
+    ],
+    students: [
+      stamp({ id: 'stu-1', registrationNumber: 'UNI-2025-001', firstNameFr: 'Mina', lastNameFr: 'El Fassi', firstNameAr: 'مينا', lastNameAr: 'الفاسي', email: 'mina.elfassi@etu.test', phone: '+212600002001', birthDate: '2004-01-09', filiereId: 'fil-gi', currentSemesterId: 'sem-gi-s3' }),
+      stamp({ id: 'stu-2', registrationNumber: 'UNI-2025-002', firstNameFr: 'Omar', lastNameFr: 'Tazi', firstNameAr: 'عمر', lastNameAr: 'التازي', email: 'omar.tazi@etu.test', phone: '+212600002002', birthDate: '2003-11-14', filiereId: 'fil-gi', currentSemesterId: 'sem-gi-s3' }),
+      stamp({ id: 'stu-3', registrationNumber: 'UNI-2025-003', firstNameFr: 'Lina', lastNameFr: 'Berrada', firstNameAr: 'لينا', lastNameAr: 'برادة', email: 'lina.berrada@etu.test', phone: '+212600002003', birthDate: '2004-03-22', filiereId: 'fil-gi', currentSemesterId: 'sem-gi-s4' }),
+      stamp({ id: 'stu-4', registrationNumber: 'UNI-2025-004', firstNameFr: 'Adam', lastNameFr: 'Harti', firstNameAr: 'آدم', lastNameAr: 'حارثي', email: 'adam.harti@etu.test', phone: '+212600002004', birthDate: '2003-07-30', filiereId: 'fil-gi', currentSemesterId: 'sem-gi-s3' }),
+      stamp({ id: 'stu-5', registrationNumber: 'UNI-2025-005', firstNameFr: 'Nour', lastNameFr: 'Ziani', firstNameAr: 'نور', lastNameAr: 'زياني', email: 'nour.ziani@etu.test', phone: '+212600002005', birthDate: '2004-04-10', filiereId: 'fil-gi', currentSemesterId: 'sem-gi-s3' }),
+      stamp({ id: 'stu-6', registrationNumber: 'UNI-2025-006', firstNameFr: 'Samir', lastNameFr: 'Idrissi', firstNameAr: 'سمير', lastNameAr: 'الإدريسي', email: 'samir.idrissi@etu.test', phone: '+212600002006', birthDate: '2003-12-03', filiereId: 'fil-ma', currentSemesterId: 'sem-ma-s3' })
+    ],
+    timetableEntries: [
+      stamp({ id: 'time-1', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', subjectId: 'sub-algo', teacherId: 'teach-1', weekday: 1, startTime: '09:00', endTime: '11:00' }),
+      stamp({ id: 'time-2', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', subjectId: 'sub-db', teacherId: 'teach-2', weekday: 2, startTime: '10:00', endTime: '12:00' }),
+      stamp({ id: 'time-3', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', subjectId: 'sub-os', teacherId: 'teach-4', weekday: 3, startTime: '08:30', endTime: '10:30' }),
+      stamp({ id: 'time-4', filiereId: 'fil-gi', semesterId: 'sem-gi-s3', subjectId: 'sub-arch', teacherId: 'teach-1', weekday: 4, startTime: '14:00', endTime: '16:00' }),
+      stamp({ id: 'time-5', filiereId: 'fil-gi', semesterId: 'sem-gi-s4', subjectId: 'sub-web', teacherId: 'teach-3', weekday: 2, startTime: '14:00', endTime: '16:00' }),
+      stamp({ id: 'time-6', filiereId: 'fil-ma', semesterId: 'sem-ma-s3', subjectId: 'sub-analysis', teacherId: 'teach-4', weekday: 1, startTime: '09:00', endTime: '11:00' })
+    ],
+    grades: [
+      stamp({ id: 'grade-1', studentId: 'stu-1', subjectId: 'sub-algo', semesterId: 'sem-gi-s3', teacherId: 'teach-1', mark: 14.9, appreciation: 'Bien', published: true, gradedAt: '2026-01-20T09:00:00.000Z' }),
+      stamp({ id: 'grade-2', studentId: 'stu-1', subjectId: 'sub-db', semesterId: 'sem-gi-s3', teacherId: 'teach-2', mark: 16, appreciation: 'Très bien', published: true, gradedAt: '2026-01-22T09:00:00.000Z' }),
+      stamp({ id: 'grade-3', studentId: 'stu-2', subjectId: 'sub-algo', semesterId: 'sem-gi-s3', teacherId: 'teach-1', mark: 11.9, appreciation: 'Passable', published: true, gradedAt: '2026-01-20T10:00:00.000Z' }),
+      stamp({ id: 'grade-4', studentId: 'stu-5', subjectId: 'sub-algo', semesterId: 'sem-gi-s3', teacherId: 'teach-1', mark: 4.8, appreciation: 'Insuffisant', published: true, gradedAt: '2026-01-20T11:00:00.000Z' })
+    ],
+    activityLogs: [
+      stamp({ id: 'log-1', actorUserId: 'user-admin', action: 'seeded', entityType: 'database', entityId: 'demo', summary: 'Base relationnelle de démonstration initialisée', timestamp: now })
+    ]
+  });
+}
+
+
+// Local repository abstraction
+class Repository {
+  constructor(adapter, collectionName) {
+    this.adapter = adapter;
+    this.collectionName = collectionName;
+  }
+
+  async list({ includeArchived = false } = {}) {
+    const records = await this.adapter.getCollection(this.collectionName);
+    return includeArchived ? records : records.filter((record) => record.status !== 'archived');
+  }
+
+  async getById(id) {
+    return this.adapter.getById(this.collectionName, id);
+  }
+
+  async create(record) {
+    return this.adapter.create(this.collectionName, record);
+  }
+
+  async update(id, changes) {
+    return this.adapter.update(this.collectionName, id, changes);
+  }
+
+  async archive(id) {
+    return this.update(id, { status: 'archived' });
+  }
+
+  async remove(id) {
+    return this.adapter.remove(this.collectionName, id);
+  }
+
+  async where(criteria = {}) {
+    const entries = Object.entries(criteria);
+    const records = await this.list({ includeArchived: true });
+    return records.filter((record) => entries.every(([key, value]) => record[key] === value));
+  }
+
+  async findBy(key, value) {
+    const records = await this.where({ [key]: value });
+    return records[0] ?? null;
+  }
+}
+
+
+// Storage adapters
+
+function clone(value) {
+  return structuredClone(value);
+}
+
+function ensureArray(snapshot, collection) {
+  if (!Array.isArray(snapshot[collection])) {
+    throw new Error(`Invalid collection: ${collection}`);
+  }
+}
+
+class MemoryStorageAdapter {
+  constructor(initialDatabase = createSeedDatabase()) {
+    this.database = clone(initialDatabase);
+    this.counter = 1;
+  }
+
+  async initialize() {
+    if (!this.database || this.database.version !== DATABASE_VERSION) {
+      this.database = createSeedDatabase();
+    }
+    return clone(this.database);
+  }
+
+  async getCollection(name) {
+    await this.initialize();
+    ensureArray(this.database, name);
+    return clone(this.database[name]);
+  }
+
+  async getById(collection, id) {
+    const items = await this.getCollection(collection);
+    return items.find((item) => item.id === id) ?? null;
+  }
+
+  async create(collection, record) {
+    await this.initialize();
+    ensureArray(this.database, collection);
+    const timestamp = new Date().toISOString();
+    const created = {
+      id: record.id ?? `id-${Date.now()}-${this.counter++}`,
+      createdAt: record.createdAt ?? timestamp,
+      updatedAt: timestamp,
+      status: record.status ?? 'active',
+      ...clone(record)
+    };
+    this.database[collection].push(created);
+    return clone(created);
+  }
+
+  async update(collection, id, changes) {
+    await this.initialize();
+    ensureArray(this.database, collection);
+    const index = this.database[collection].findIndex((item) => item.id === id);
+    if (index === -1) {
+      throw new Error(`Record not found: ${collection}/${id}`);
+    }
+    const updated = {
+      ...this.database[collection][index],
+      ...clone(changes),
+      id,
+      updatedAt: new Date().toISOString()
+    };
+    this.database[collection][index] = updated;
+    return clone(updated);
+  }
+
+  async remove(collection, id) {
+    await this.initialize();
+    ensureArray(this.database, collection);
+    const before = this.database[collection].length;
+    this.database[collection] = this.database[collection].filter((item) => item.id !== id);
+    return before !== this.database[collection].length;
+  }
+
+  async replaceDatabase(snapshot) {
+    if (!snapshot || snapshot.version !== DATABASE_VERSION) {
+      throw new Error('Invalid database version');
+    }
+    for (const collection of Object.keys(createSeedDatabase())) {
+      if (collection !== 'version' && collection !== 'migratedAt') {
+        ensureArray(snapshot, collection);
+      }
+    }
+    this.database = clone(snapshot);
+    return clone(this.database);
+  }
+
+  async exportDatabase() {
+    await this.initialize();
+    return clone(this.database);
+  }
+
+  async clear() {
+    this.database = createSeedDatabase();
+    return clone(this.database);
+  }
+}
+
+class LocalStorageAdapter extends MemoryStorageAdapter {
+  constructor({ key = 'uniflow.database', seedFactory = createSeedDatabase } = {}) {
+    super(seedFactory());
+    this.key = key;
+    this.seedFactory = seedFactory;
+  }
+
+  readRaw() {
+    if (typeof localStorage === 'undefined') {
+      return null;
+    }
+    return localStorage.getItem(this.key);
+  }
+
+  writeRaw(snapshot) {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(this.key, JSON.stringify(snapshot));
+    }
+  }
+
+  async initialize() {
+    const raw = this.readRaw();
+    if (!raw) {
+      this.database = this.seedFactory();
+      this.writeRaw(this.database);
+      return clone(this.database);
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed.version !== DATABASE_VERSION) {
+        this.database = this.seedFactory();
+        this.writeRaw(this.database);
+      } else {
+        this.database = parsed;
+      }
+    } catch {
+      this.database = this.seedFactory();
+      this.writeRaw(this.database);
+    }
+    return clone(this.database);
+  }
+
+  async create(collection, record) {
+    const result = await super.create(collection, record);
+    this.writeRaw(this.database);
+    return result;
+  }
+
+  async update(collection, id, changes) {
+    const result = await super.update(collection, id, changes);
+    this.writeRaw(this.database);
+    return result;
+  }
+
+  async remove(collection, id) {
+    const result = await super.remove(collection, id);
+    this.writeRaw(this.database);
+    return result;
+  }
+
+  async replaceDatabase(snapshot) {
+    const result = await super.replaceDatabase(snapshot);
+    this.writeRaw(this.database);
+    return result;
+  }
+
+  async clear() {
+    this.database = this.seedFactory();
+    this.writeRaw(this.database);
+    return clone(this.database);
+  }
+}
+
+
+// French and Arabic labels
+const dictionaries = {
+  fr: {
+    'app.name': 'UniFlow',
+    'app.subtitle': 'Gestion universitaire',
+    'actions.add': 'Ajouter',
+    'actions.archive': 'Archiver',
+    'actions.cancel': 'Annuler',
+    'actions.export': 'Exporter',
+    'actions.import': 'Importer',
+    'actions.login': 'Se connecter',
+    'actions.logout': 'Déconnexion',
+    'actions.print': 'Imprimer',
+    'actions.reset': 'Réinitialiser',
+    'actions.save': 'Enregistrer',
+    'actions.search': 'Rechercher',
+    'auth.demo': 'Comptes de démonstration',
+    'auth.password': 'Mot de passe',
+    'auth.signin': 'Connexion',
+    'dashboard.title': 'Tableau de bord',
+    'fields.email': 'Email',
+    'fields.role': 'Rôle',
+    'forms.required': 'Ce champ est obligatoire.',
+    'nav.dashboard': 'Tableau de bord',
+    'nav.school': 'École',
+    'nav.timetable': 'Emploi du temps',
+    'nav.gradebook': 'Carnet de notes',
+    'nav.grades': 'Notes',
+    'nav.mySubjects': 'Mes matières',
+    'nav.myGrades': 'Mes notes',
+    'nav.myFiliere': 'Ma filière',
+    'nav.mySchedule': 'Mon emploi du temps',
+    'nav.myTranscript': 'Relevé',
+    'nav.profile': 'Profil',
+    'nav.settings': 'Paramètres',
+    'nav.students': 'Étudiants',
+    'nav.teachers': 'Enseignants',
+    'nav.users': 'Utilisateurs',
+    'roles.admin': 'Administrateur',
+    'roles.student': 'Étudiant',
+    'roles.teacher': 'Enseignant',
+    'status.active': 'Actif',
+    'status.archived': 'Archivé',
+    'status.validated': 'Validé',
+    'status.failed': 'Ajourné',
+    'toast.saved': 'Données enregistrées.',
+    'validation.invalidCredentials': 'Identifiants invalides'
+  },
+  ar: {
+    'app.name': 'UniFlow',
+    'app.subtitle': 'تدبير جامعي',
+    'actions.add': 'إضافة',
+    'actions.archive': 'أرشفة',
+    'actions.cancel': 'إلغاء',
+    'actions.export': 'تصدير',
+    'actions.import': 'استيراد',
+    'actions.login': 'تسجيل الدخول',
+    'actions.logout': 'خروج',
+    'actions.print': 'طباعة',
+    'actions.reset': 'إعادة الضبط',
+    'actions.save': 'حفظ',
+    'actions.search': 'بحث',
+    'auth.demo': 'حسابات تجريبية',
+    'auth.password': 'كلمة المرور',
+    'auth.signin': 'تسجيل الدخول',
+    'dashboard.title': 'لوحة القيادة',
+    'fields.email': 'البريد الإلكتروني',
+    'fields.role': 'الدور',
+    'forms.required': 'هذا الحقل إجباري.',
+    'nav.dashboard': 'لوحة القيادة',
+    'nav.school': 'المدرسة',
+    'nav.timetable': 'استعمال الزمن',
+    'nav.gradebook': 'دفتر النقط',
+    'nav.grades': 'النقط',
+    'nav.mySubjects': 'موادي',
+    'nav.myGrades': 'نقطي',
+    'nav.myFiliere': 'مسلكي',
+    'nav.mySchedule': 'جدولي',
+    'nav.myTranscript': 'كشف النقط',
+    'nav.profile': 'الملف',
+    'nav.settings': 'الإعدادات',
+    'nav.students': 'الطلبة',
+    'nav.teachers': 'الأساتذة',
+    'nav.users': 'المستخدمون',
+    'roles.admin': 'مسؤول',
+    'roles.student': 'طالب',
+    'roles.teacher': 'أستاذ',
+    'status.active': 'نشط',
+    'status.archived': 'مؤرشف',
+    'status.validated': 'مستوفى',
+    'status.failed': 'غير مستوفى',
+    'toast.saved': 'تم حفظ البيانات.',
+    'validation.invalidCredentials': 'بيانات الدخول غير صحيحة'
+  }
+};
+
+function interpolate(template, params = {}) {
+  return Object.entries(params).reduce((text, [key, value]) => text.replaceAll(`{${key}}`, value), template);
+}
+
+function t(locale, key, params = {}) {
+  const dictionary = dictionaries[locale] ?? dictionaries.fr;
+  return interpolate(dictionary[key] ?? dictionaries.fr[key] ?? key, params);
+}
+
+function getDirection(locale) {
+  return locale === 'ar' ? 'rtl' : 'ltr';
+}
+
+function formatNumber(locale, value, options = {}) {
+  return new Intl.NumberFormat(locale === 'ar' ? 'ar-MA' : 'fr-MA', options).format(value);
+}
+
+function formatDate(locale, value) {
+  return new Intl.DateTimeFormat(locale === 'ar' ? 'ar-MA' : 'fr-MA', { dateStyle: 'medium' }).format(new Date(value));
+}
+
+
+// Application services
+
+const COLLECTIONS = Object.keys(DATABASE_TABLES);
+
+const ROLE_ROUTES = {
+  admin: ['#/dashboard', '#/profile', '#/students', '#/teachers', '#/school', '#/timetable', '#/grades', '#/users', '#/settings'],
+  teacher: ['#/dashboard', '#/profile', '#/my-subjects', '#/gradebook', '#/my-schedule'],
+  student: ['#/dashboard', '#/profile', '#/my-filiere', '#/my-schedule', '#/my-grades', '#/my-transcript']
+};
+
+function round1(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function id(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function sameContext(record, subjectId, semesterId) {
+  return record.subjectId === subjectId && record.semesterId === semesterId;
+}
+
+function createRepositories(adapter) {
+  return Object.fromEntries(COLLECTIONS.map((collection) => [collection, new Repository(adapter, collection)]));
+}
+
+class AuthService {
+  constructor(repositories) {
+    this.repositories = repositories;
+  }
+
+  async login(email, password) {
+    const users = await this.repositories.users.list({ includeArchived: true });
+    const user = users.find((candidate) => candidate.email.toLowerCase() === email.toLowerCase() && candidate.password === password);
+    if (!user) {
+      throw new Error('Invalid credentials');
+    }
+    return user;
+  }
+
+  canAccessRoute(user, path) {
+    if (!user) {
+      return path === '#/login';
+    }
+    const normalized = normalizePath(path);
+    return ROLE_ROUTES[user.role]?.some((allowed) => normalized === allowed || normalized.startsWith(`${allowed}/`)) ?? false;
+  }
+
+  async canManageGrade(user, subjectId, semesterId) {
+    if (user.role === 'admin') {
+      return true;
+    }
+    if (user.role !== 'teacher') {
+      return false;
+    }
+    const assignments = await this.repositories.teacherAssignments.where({ teacherId: user.linkedProfileId });
+    return assignments.some((assignment) => sameContext(assignment, subjectId, semesterId));
+  }
+
+  canReadStudent(user, studentId) {
+    return user.role === 'admin' || (user.role === 'student' && user.linkedProfileId === studentId);
+  }
+}
+
+class ScheduleService {
+  constructor(repositories) {
+    this.repositories = repositories;
+  }
+
+  async getTeacherAssignments(teacherId) {
+    const [assignments, teachers, filieres, semesters, subjects] = await Promise.all([
+      this.repositories.teacherAssignments.where({ teacherId }),
+      this.repositories.teachers.list(),
+      this.repositories.filieres.list(),
+      this.repositories.semesters.list(),
+      this.repositories.subjects.list()
+    ]);
+
+    return assignments.map((assignment) => ({
+      assignment,
+      teacher: teachers.find((teacher) => teacher.id === assignment.teacherId),
+      filiere: filieres.find((filiere) => filiere.id === assignment.filiereId),
+      semester: semesters.find((semester) => semester.id === assignment.semesterId),
+      subject: subjects.find((subject) => subject.id === assignment.subjectId)
+    }));
+  }
+
+  async getStudentTimetable(studentId) {
+    const student = await this.repositories.students.getById(studentId);
+    if (!student) {
+      return [];
+    }
+    return this.getTimetable({
+      filiereId: student.filiereId,
+      semesterId: student.currentSemesterId
+    });
+  }
+
+  async getTeacherTimetable(teacherId) {
+    return this.getTimetable({ teacherId });
+  }
+
+  async getTimetable(criteria = {}) {
+    const [entries, filieres, semesters, subjects, teachers] = await Promise.all([
+      this.repositories.timetableEntries.list(),
+      this.repositories.filieres.list(),
+      this.repositories.semesters.list(),
+      this.repositories.subjects.list(),
+      this.repositories.teachers.list()
+    ]);
+
+    return entries
+      .filter((entry) => Object.entries(criteria).every(([key, value]) => !value || entry[key] === value))
+      .map((entry) => ({
+        entry,
+        filiere: filieres.find((filiere) => filiere.id === entry.filiereId),
+        semester: semesters.find((semester) => semester.id === entry.semesterId),
+        subject: subjects.find((subject) => subject.id === entry.subjectId),
+        teacher: teachers.find((teacher) => teacher.id === entry.teacherId)
+      }))
+      .sort((a, b) => a.entry.weekday - b.entry.weekday || a.entry.startTime.localeCompare(b.entry.startTime));
+  }
+}
+
+class GradeService {
+  constructor(repositories) {
+    this.repositories = repositories;
+  }
+
+  getMention(mark) {
+    if (mark >= 16) return 'Très bien';
+    if (mark >= 14) return 'Bien';
+    if (mark >= 12) return 'Assez bien';
+    if (mark >= 10) return 'Passable';
+    return 'Ajourné';
+  }
+
+  async getStudentTranscript(studentId) {
+    const [student, subjects, semesters, grades, teachers, assignments] = await Promise.all([
+      this.repositories.students.getById(studentId),
+      this.repositories.subjects.list(),
+      this.repositories.semesters.list(),
+      this.repositories.grades.where({ studentId }),
+      this.repositories.teachers.list(),
+      this.repositories.teacherAssignments.list()
+    ]);
+    if (!student) {
+      return [];
+    }
+
+    return subjects
+      .filter((subject) => subject.filiereId === student.filiereId && subject.semesterId === student.currentSemesterId)
+      .map((subject) => {
+        const assignment = assignments.find((item) => sameContext(item, subject.id, subject.semesterId));
+        const grade = grades.find((item) => sameContext(item, subject.id, subject.semesterId));
+        const mark = grade?.published ? grade.mark : null;
+        return {
+          subject,
+          semester: semesters.find((semester) => semester.id === subject.semesterId),
+          teacher: teachers.find((teacher) => teacher.id === assignment?.teacherId),
+          grade: grade ?? null,
+          mark,
+          appreciation: grade?.published ? grade.appreciation : 'En attente',
+          mention: mark === null ? 'En attente' : this.getMention(mark),
+          validated: mark !== null && mark >= 10
+        };
+      });
+  }
+
+  async getStudentAverage(studentId) {
+    const transcript = await this.getStudentTranscript(studentId);
+    const published = transcript.filter((row) => row.mark !== null);
+    if (!published.length) {
+      return null;
+    }
+    const weighted = published.reduce((sum, row) => sum + row.mark * row.subject.coefficient, 0);
+    const coefficients = published.reduce((sum, row) => sum + row.subject.coefficient, 0);
+    return round1(weighted / coefficients);
+  }
+
+  async saveGrade({ actorUserId, studentId, subjectId, semesterId, mark, appreciation = '' }) {
+    const numericMark = Number(mark);
+    if (Number.isNaN(numericMark) || numericMark < 0 || numericMark > 20) {
+      throw new Error('Mark must be between 0 and 20');
+    }
+
+    const [actor, student, subject, assignments] = await Promise.all([
+      this.repositories.users.getById(actorUserId),
+      this.repositories.students.getById(studentId),
+      this.repositories.subjects.getById(subjectId),
+      this.repositories.teacherAssignments.where({ subjectId })
+    ]);
+
+    if (!actor) {
+      throw new Error('Actor not found');
+    }
+    if (!student || !subject || student.filiereId !== subject.filiereId || student.currentSemesterId !== semesterId || subject.semesterId !== semesterId) {
+      throw new Error('Student is not enrolled in this subject context');
+    }
+
+    const assignment = assignments.find((item) => sameContext(item, subjectId, semesterId));
+    if (!assignment) {
+      throw new Error('Subject has no assigned teacher');
+    }
+    if (actor.role === 'teacher' && assignment.teacherId !== actor.linkedProfileId) {
+      throw new Error('Teacher is not assigned to this subject');
+    }
+    if (!['admin', 'teacher'].includes(actor.role)) {
+      throw new Error('Only teachers and admins can save grades');
+    }
+
+    const existing = (await this.repositories.grades.where({ studentId })).find((grade) => sameContext(grade, subjectId, semesterId));
+    const payload = {
+      studentId,
+      subjectId,
+      semesterId,
+      teacherId: assignment.teacherId,
+      mark: numericMark,
+      appreciation,
+      published: true,
+      gradedAt: new Date().toISOString()
+    };
+
+    return existing
+      ? this.repositories.grades.update(existing.id, payload)
+      : this.repositories.grades.create({ id: id('grade'), ...payload });
+  }
+}
+
+class AcademicService {
+  constructor(repositories, adapter) {
+    this.repositories = repositories;
+    this.adapter = adapter;
+  }
+
+  async createStudent(input) {
+    if (await this.repositories.students.findBy('registrationNumber', input.registrationNumber)) {
+      throw new Error('Registration number already exists');
+    }
+    if (await this.repositories.users.findBy('email', input.email)) {
+      throw new Error('Email already exists');
+    }
+
+    const student = await this.repositories.students.create({
+      id: id('stu'),
+      ...input,
+      status: 'active'
+    });
+    await this.repositories.users.create({
+      id: id('user'),
+      displayName: `${input.firstNameFr} ${input.lastNameFr}`,
+      email: input.email,
+      password: 'demo123',
+      role: 'student',
+      linkedProfileId: student.id,
+      locale: 'fr',
+      avatar: `${input.firstNameFr[0] ?? 'E'}${input.lastNameFr[0] ?? 'T'}`
+    });
+    await this.repositories.activityLogs.create({
+      id: id('log'),
+      actorUserId: 'user-admin',
+      action: 'student:created',
+      entityType: 'student',
+      entityId: student.id,
+      summary: `Student ${student.registrationNumber} created`,
+      timestamp: new Date().toISOString()
+    });
+    return student;
+  }
+
+  async resetDemoData() {
+    await this.adapter.replaceDatabase(createSeedDatabase());
+  }
+
+  async exportCsv(collectionName) {
+    const rows = await this.repositories[collectionName].list({ includeArchived: true });
+    if (!rows.length) {
+      return '';
+    }
+    const headers = Object.keys(rows[0]);
+    const body = rows.map((row) => headers.map((header) => JSON.stringify(row[header] ?? '')).join(','));
+    return [headers.join(','), ...body].join('\n');
+  }
+}
+
+function normalizePath(path) {
+  const withoutQuery = (path || '#/dashboard').split('?')[0];
+  const segments = withoutQuery.split('/').filter(Boolean);
+  if (segments.length > 2 && ['gradebook'].includes(segments[1])) {
+    return `#/${segments[1]}`;
+  }
+  return withoutQuery;
+}
+
+
+// UI and app bootstrap
+
+const ROUTES = [
   { path: '#/login', labelKey: 'auth.signin', roles: ['guest'] },
   { path: '#/dashboard', labelKey: 'nav.dashboard', roles: ['admin', 'teacher', 'student'] },
   { path: '#/profile', labelKey: 'nav.profile', roles: ['admin', 'teacher', 'student'] },
   { path: '#/students', labelKey: 'nav.students', roles: ['admin'] },
   { path: '#/teachers', labelKey: 'nav.teachers', roles: ['admin'] },
-  { path: '#/programs', labelKey: 'nav.academic', roles: ['admin'] },
-  { path: '#/academic-structure', labelKey: 'nav.academic', roles: ['admin'] },
-  { path: '#/enrollments', labelKey: 'nav.enrollments', roles: ['admin'] },
-  { path: '#/assignments', labelKey: 'nav.assignments', roles: ['admin'] },
-  { path: '#/schedule', labelKey: 'nav.schedule', roles: ['admin'] },
+  { path: '#/school', labelKey: 'nav.school', roles: ['admin'] },
+  { path: '#/timetable', labelKey: 'nav.timetable', roles: ['admin'] },
   { path: '#/grades', labelKey: 'nav.grades', roles: ['admin'] },
-  { path: '#/reports', labelKey: 'nav.reports', roles: ['admin'] },
   { path: '#/users', labelKey: 'nav.users', roles: ['admin'] },
   { path: '#/settings', labelKey: 'nav.settings', roles: ['admin'] },
-  { path: '#/my-courses', labelKey: 'nav.myCourses', roles: ['teacher'] },
-  { path: '#/my-groups', labelKey: 'nav.groups', roles: ['teacher'] },
+  { path: '#/my-subjects', labelKey: 'nav.mySubjects', roles: ['teacher'] },
   { path: '#/gradebook', labelKey: 'nav.gradebook', roles: ['teacher'] },
+  { path: '#/my-filiere', labelKey: 'nav.myFiliere', roles: ['student'] },
   { path: '#/my-schedule', labelKey: 'nav.mySchedule', roles: ['teacher', 'student'] },
-  { path: '#/my-program', labelKey: 'nav.myProgram', roles: ['student'] },
   { path: '#/my-grades', labelKey: 'nav.myGrades', roles: ['student'] },
   { path: '#/my-transcript', labelKey: 'nav.myTranscript', roles: ['student'] },
   { path: '#/not-found', labelKey: 'notFound.title', roles: ['admin', 'teacher', 'student'] }
@@ -37,12 +759,12 @@ const weekdayKeysAr = ['الأحد', 'الإثنين', 'الثلاثاء', 'ال
 let appState = null;
 let activeChart = null;
 
-export function resolveRoute(path = DEFAULT_ROUTE) {
+function resolveRoute(path = DEFAULT_ROUTE) {
   const normalized = normalizePath(path);
   return ROUTES.find((route) => route.path === normalized) ?? ROUTES.find((route) => route.path === '#/not-found');
 }
 
-export function getAvailableRoutes(user) {
+function getAvailableRoutes(user) {
   if (!user) {
     return ROUTES.filter((route) => route.roles.includes('guest'));
   }
@@ -55,7 +777,7 @@ function byId(collection, id) {
 
 function localName(record, locale, prefix = 'name') {
   if (!record) return '';
-  return locale === 'ar' ? record[`${prefix}Ar`] || record[`${prefix}Fr`] || record.label || record.code : record[`${prefix}Fr`] || record[`${prefix}Ar`] || record.label || record.code;
+  return locale === 'ar' ? record[`${prefix}Ar`] || record[`${prefix}Fr`] || record.labelAr || record.labelFr || record.code : record[`${prefix}Fr`] || record[`${prefix}Ar`] || record.labelFr || record.labelAr || record.code;
 }
 
 function personName(person, locale) {
@@ -86,20 +808,15 @@ function routeIcon(path) {
     '#/profile': 'person-circle',
     '#/students': 'mortarboard',
     '#/teachers': 'person-workspace',
-    '#/programs': 'diagram-3',
-    '#/academic-structure': 'building',
-    '#/enrollments': 'clipboard-check',
-    '#/assignments': 'person-lines-fill',
-    '#/schedule': 'calendar-week',
+    '#/school': 'diagram-3',
+    '#/timetable': 'calendar-week',
     '#/grades': 'journal-check',
-    '#/reports': 'bar-chart',
     '#/users': 'people',
     '#/settings': 'gear',
-    '#/my-courses': 'book',
-    '#/my-groups': 'people',
+    '#/my-subjects': 'book',
     '#/gradebook': 'table',
     '#/my-schedule': 'calendar3',
-    '#/my-program': 'diagram-2',
+    '#/my-filiere': 'diagram-2',
     '#/my-grades': 'patch-check',
     '#/my-transcript': 'printer'
   };
@@ -178,7 +895,7 @@ function emptyState(text) {
 }
 
 function badge(text, tone = 'primary') {
-  return `<span class="badge rounded-pill text-bg-${tone}">${text}</span>`;
+  return `<span class="badge rounded-pill text-bg-${tone}">${escapeHtml(text)}</span>`;
 }
 
 function download(filename, content, type = 'application/json') {
@@ -192,9 +909,8 @@ function download(filename, content, type = 'application/json') {
 }
 
 async function loadData() {
-  const repositories = appState.repositories;
   const entries = await Promise.all(
-    Object.entries(repositories).map(async ([name, repo]) => [name, await repo.list({ includeArchived: true })])
+    Object.entries(appState.repositories).map(async ([name, repo]) => [name, await repo.list({ includeArchived: true })])
   );
   return Object.fromEntries(entries);
 }
@@ -209,9 +925,9 @@ async function findCurrentProfile(data) {
 
 function renderLogin(locale) {
   const accounts = [
-    ['admin@uniflow.local', 'Administrateur', 'admin'],
-    ['teacher@uniflow.local', 'Enseignant', 'teacher'],
-    ['student@uniflow.local', 'Étudiant', 'student']
+    ['admin@uniflow.local', 'Administrateur', 'AD'],
+    ['teacher@uniflow.local', 'Enseignant', 'TE'],
+    ['student@uniflow.local', 'Étudiant', 'ST']
   ];
   return `
     <main class="login-screen">
@@ -219,41 +935,37 @@ function renderLogin(locale) {
         <div class="login-form-card">
           <h2>${t(locale, 'auth.signin')}</h2>
           <p>${locale === 'ar' ? 'اختر حسابا تجريبيا أو استعمل بيانات الدخول.' : 'Choisissez un compte de démonstration ou utilisez les identifiants.'}</p>
-        <form id="loginForm" class="stack">
-          <label class="form-label">${t(locale, 'fields.email')}</label>
-          <input class="form-control" name="email" value="admin@uniflow.local" required>
-          <label class="form-label">${t(locale, 'auth.password')}</label>
-          <input class="form-control" name="password" value="demo123" type="password" required>
-          <button class="btn btn-primary btn-lg" type="submit"><i class="bi bi-box-arrow-in-right"></i>${t(locale, 'actions.login')}</button>
-        </form>
+          <form id="loginForm" class="stack">
+            <label class="form-label">${t(locale, 'fields.email')}</label>
+            <input class="form-control" name="email" value="admin@uniflow.local" required>
+            <label class="form-label">${t(locale, 'auth.password')}</label>
+            <input class="form-control" name="password" value="demo123" type="password" required>
+            <button class="btn btn-primary btn-lg" type="submit"><i class="bi bi-box-arrow-in-right"></i>${t(locale, 'actions.login')}</button>
+          </form>
         </div>
       </section>
       <aside class="demo-panel">
         <div class="login-brand-copy">
           <div class="brand-mark">UF</div>
           <h1>${t(locale, 'app.name')}</h1>
-          <p>${locale === 'ar' ? 'واجهة جامعية محلية بثلاثة أدوار وقواعد نقط مغربية.' : 'Application locale de gestion universitaire avec trois rôles et notes marocaines.'}</p>
+          <p>${locale === 'ar' ? 'واجهة جامعية محلية بثلاثة أدوار ونموذج بيانات بسيط.' : 'Application locale de gestion universitaire avec trois rôles et modèle de données relationnel simple.'}</p>
         </div>
         <div class="d-flex justify-content-between align-items-center mb-3">
           <h2>${t(locale, 'auth.demo')}</h2>
           <button class="btn btn-outline-light btn-sm" data-action="toggle-locale">${locale === 'ar' ? 'FR' : 'AR'}</button>
         </div>
         <div class="demo-list">
-          ${accounts
-            .map(
-              ([email, role, key]) => `
-              <button class="demo-account" data-demo-email="${email}">
-                <span class="avatar">${key.slice(0, 2).toUpperCase()}</span>
-                <span><strong>${role}</strong><small>${email} / demo123</small></span>
-              </button>`
-            )
-            .join('')}
+          ${accounts.map(([email, role, initials]) => `
+            <button class="demo-account" data-demo-email="${email}">
+              <span class="avatar">${initials}</span>
+              <span><strong>${role}</strong><small>${email} / demo123</small></span>
+            </button>`).join('')}
         </div>
       </aside>
     </main>`;
 }
 
-function renderShell(content, data) {
+function renderShell(content) {
   const { user, locale } = appState;
   const direction = getDirection(locale);
   return `
@@ -296,80 +1008,66 @@ function renderShell(content, data) {
 async function renderDashboard(data) {
   const { locale, user } = appState;
   if (user.role === 'admin') {
-    const activeStudents = data.students.filter((student) => student.status === 'active').length;
-    const teachers = data.teachers.filter((teacher) => teacher.status === 'active').length;
-    const validated = await Promise.all(data.students.map((student) => appState.grades.getSubjectAverage(student.id, 'sub-algo')));
-    const successRate = Math.round((validated.filter((item) => item.validated).length / validated.length) * 100);
-    const warnings = await Promise.all(data.scheduleEntries.map((entry) => appState.schedule.validateEntry(entry)));
+    const gradedStudents = new Set(data.grades.map((grade) => grade.studentId)).size;
+    const successRate = gradedStudents ? Math.round((new Set(data.grades.filter((grade) => grade.mark >= 10).map((grade) => grade.studentId)).size / gradedStudents) * 100) : 0;
     return `
       <div class="metric-grid">
-        ${metric(locale === 'ar' ? 'الطلبة النشطون' : 'Étudiants actifs', activeStudents, '2025-2026', 'mortarboard')}
-        ${metric(locale === 'ar' ? 'الأساتذة' : 'Enseignants', teachers, locale === 'ar' ? 'مكلفون بالتدريس' : 'affectés aux modules', 'person-workspace')}
-        ${metric(locale === 'ar' ? 'نسبة النجاح' : 'Taux de réussite', `${successRate}%`, 'Algorithmique', 'graph-up')}
-        ${metric(locale === 'ar' ? 'تنبيهات الجدول' : 'Alertes planning', warnings.filter((item) => !item.valid).length, locale === 'ar' ? 'تعارضات' : 'conflits', 'exclamation-triangle')}
+        ${metric(locale === 'ar' ? 'الطلبة' : 'Étudiants', data.students.length, '2025-2026', 'mortarboard')}
+        ${metric(locale === 'ar' ? 'الأساتذة' : 'Enseignants', data.teachers.length, locale === 'ar' ? 'مكلفون' : 'affectés', 'person-workspace')}
+        ${metric(locale === 'ar' ? 'المسالك' : 'Filières', data.filieres.length, locale === 'ar' ? 'مفتوحة' : 'ouvertes', 'diagram-3')}
+        ${metric(locale === 'ar' ? 'نسبة النجاح' : 'Taux de réussite', `${successRate}%`, locale === 'ar' ? 'نقط منشورة' : 'notes publiées', 'graph-up')}
       </div>
-      ${section(locale === 'ar' ? 'توزيع المسالك' : 'Répartition par filière', '<div class="chart-frame chart-frame-sm"><canvas id="programChart"></canvas></div>')}
+      ${section(locale === 'ar' ? 'توزيع الطلبة حسب المسلك' : 'Répartition des étudiants par filière', '<div class="chart-frame chart-frame-sm"><canvas id="filiereChart"></canvas></div>')}
       ${section(locale === 'ar' ? 'النشاط الأخير' : 'Activité récente', renderActivity(data.activityLogs, locale))}`;
   }
   if (user.role === 'teacher') {
     const teacher = byId(data.teachers, user.linkedProfileId);
-    const assignments = data.teachingAssignments.filter((item) => item.teacherId === teacher.id);
+    const assignments = await appState.schedule.getTeacherAssignments(teacher.id);
+    const timetable = await appState.schedule.getTeacherTimetable(teacher.id);
+    const studentCount = new Set(assignments.flatMap((item) => data.students.filter((student) => student.filiereId === item.filiere.id && student.currentSemesterId === item.semester.id).map((student) => student.id))).size;
     return `
       <div class="metric-grid">
         ${metric(locale === 'ar' ? 'المواد' : 'Matières', assignments.length, personName(teacher, locale), 'book')}
-        ${metric(locale === 'ar' ? 'المجموعات' : 'Groupes', new Set(assignments.flatMap((item) => item.groupIds)).size, locale === 'ar' ? 'هذه السنة' : 'cette année', 'people')}
-        ${metric(locale === 'ar' ? 'حصص هذا الأسبوع' : 'Séances semaine', data.scheduleEntries.filter((entry) => entry.teacherId === teacher.id).length, locale === 'ar' ? 'مبرمجة' : 'programmées', 'calendar-week')}
+        ${metric(locale === 'ar' ? 'الطلبة المعنيون' : 'Étudiants concernés', studentCount, locale === 'ar' ? 'حسب المسلك' : 'par filière', 'people')}
+        ${metric(locale === 'ar' ? 'حصص الأسبوع' : 'Séances semaine', timetable.length, locale === 'ar' ? 'مبرمجة' : 'programmées', 'calendar-week')}
       </div>
-      ${section(t(locale, 'nav.myCourses'), renderTeacherCourses(data, teacher.id))}`;
+      ${section(t(locale, 'nav.mySubjects'), renderTeacherSubjects(assignments, locale))}`;
   }
+
   const student = byId(data.students, user.linkedProfileId);
-  const transcript = await appState.grades.getStudentTranscript(student.id);
-  const publishable = transcript.flatMap((module) => module.subjects).filter((row) => row.result.publishable);
-  const average = publishable.length ? roundAverage(publishable.reduce((sum, row) => sum + row.result.average, 0) / publishable.length) : '-';
+  const average = await appState.grades.getStudentAverage(student.id);
+  const timetable = await appState.schedule.getStudentTimetable(student.id);
   return `
     <div class="metric-grid">
-      ${metric(locale === 'ar' ? 'المعدل العام' : 'Moyenne générale', `${average}/20`, locale === 'ar' ? 'مواد منشورة' : 'matières publiées', 'patch-check')}
-      ${metric(locale === 'ar' ? 'المسلك' : 'Filière', escapeHtml(localName(byId(data.programs, student.programId), locale)), byId(data.groups, student.groupId).code, 'diagram-2')}
+      ${metric(locale === 'ar' ? 'المعدل' : 'Moyenne', average === null ? '-' : `${average}/20`, locale === 'ar' ? 'النقط المنشورة' : 'notes publiées', 'patch-check')}
+      ${metric(locale === 'ar' ? 'المسلك' : 'Filière', escapeHtml(localName(byId(data.filieres, student.filiereId), locale)), byId(data.semesters, student.currentSemesterId)?.code, 'diagram-2')}
+      ${metric(locale === 'ar' ? 'حصص الأسبوع' : 'Séances semaine', timetable.length, locale === 'ar' ? 'حسب المسلك' : 'selon la filière', 'calendar3')}
     </div>
-    ${section(t(locale, 'nav.mySchedule'), renderScheduleTable(data.scheduleEntries.filter((entry) => entry.groupId === student.groupId), data, locale))}`;
-}
-
-function roundAverage(value) {
-  return Math.round(value * 10) / 10;
+    ${section(t(locale, 'nav.mySchedule'), renderTimetableTable(timetable, locale))}`;
 }
 
 function renderActivity(logs, locale) {
   return `
     <div class="timeline">
-      ${logs
-        .slice(-6)
-        .reverse()
-        .map((log) => `<div><span>${formatDate(locale, log.timestamp)}</span><strong>${escapeHtml(log.summary)}</strong></div>`)
-        .join('')}
+      ${logs.slice(-6).reverse().map((log) => `<div><span>${formatDate(locale, log.timestamp)}</span><strong>${escapeHtml(log.summary)}</strong></div>`).join('')}
     </div>`;
 }
 
 function renderStudents(data) {
   const { locale } = appState;
-  const rows = data.students
-    .map((student) => {
-      const program = byId(data.programs, student.programId);
-      const group = byId(data.groups, student.groupId);
-      return `<tr>
-        <td><strong>${personName(student, locale)}</strong><div class="muted">${student.registrationNumber}</div></td>
-        <td>${escapeHtml(localName(program, locale))}</td>
-        <td>${group?.code ?? '-'}</td>
-        <td>${student.email}</td>
-        <td>${badge(t(locale, `status.${student.status}`), student.status === 'active' ? 'success' : 'secondary')}</td>
-        <td><button class="btn btn-sm btn-outline-secondary" data-action="archive-student" data-id="${student.id}"><i class="bi bi-archive"></i></button></td>
-      </tr>`;
-    })
-    .join('');
+  const rows = data.students.map((student) => `<tr>
+    <td><strong>${personName(student, locale)}</strong><div class="muted">${student.registrationNumber}</div></td>
+    <td>${escapeHtml(localName(byId(data.filieres, student.filiereId), locale))}</td>
+    <td>${escapeHtml(localName(byId(data.semesters, student.currentSemesterId), locale, 'label'))}</td>
+    <td>${escapeHtml(student.email)}</td>
+    <td>${badge(t(locale, `status.${student.status}`), student.status === 'active' ? 'success' : 'secondary')}</td>
+    <td><button class="btn btn-sm btn-outline-secondary" data-action="archive-student" data-id="${student.id}"><i class="bi bi-archive"></i></button></td>
+  </tr>`).join('');
   return `
     ${section(
       t(locale, 'nav.students'),
       `<div class="table-toolbar"><input class="form-control" data-filter-table="studentsTable" placeholder="${t(locale, 'actions.search')}"></div>
-       <div class="table-responsive"><table class="table align-middle searchable-table" id="studentsTable"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'المجموعة' : 'Groupe'}</th><th>Email</th><th>${locale === 'ar' ? 'الحالة' : 'Statut'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`,
+       <div class="table-responsive"><table class="table align-middle searchable-table" id="studentsTable"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'السداسي' : 'Semestre'}</th><th>Email</th><th>${locale === 'ar' ? 'الحالة' : 'Statut'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`,
       `<button class="btn btn-primary" data-action="open-modal" data-target="createStudentModal"><i class="bi bi-plus-lg"></i>${t(locale, 'actions.add')}</button>`
     )}
     ${renderStudentForm(data, locale)}`;
@@ -385,9 +1083,8 @@ function renderStudentForm(data, locale) {
     ${formField('Email', '<input class="form-control" name="email" placeholder="email@example.test" type="email" required>')}
     ${formField(locale === 'ar' ? 'الهاتف' : 'Téléphone', '<input class="form-control" name="phone" placeholder="+212..." required>')}
     ${formField(locale === 'ar' ? 'تاريخ الازدياد' : 'Date de naissance', '<input class="form-control" name="birthDate" type="date" required>')}
-    ${formField(locale === 'ar' ? 'المسلك' : 'Filière', `<select class="form-select" name="programId">${optionTags(data.programs, 'prog-cs', locale)}</select>`)}
-    ${formField(locale === 'ar' ? 'المستوى' : 'Niveau', `<select class="form-select" name="levelId">${optionTags(data.levels, 'lvl-cs-2', locale, 'label')}</select>`)}
-    ${formField(locale === 'ar' ? 'المجموعة' : 'Groupe', `<select class="form-select" name="groupId">${optionTags(data.groups, 'grp-cs-2a', locale, 'code')}</select>`)}
+    ${formField(locale === 'ar' ? 'المسلك' : 'Filière', `<select class="form-select" name="filiereId">${optionTags(data.filieres, 'fil-gi', locale)}</select>`)}
+    ${formField(locale === 'ar' ? 'السداسي الحالي' : 'Semestre actuel', `<select class="form-select" name="currentSemesterId">${optionTags(data.semesters, 'sem-gi-s3', locale, 'label')}</select>`)}
   `;
   return renderFormModal({
     id: 'createStudentModal',
@@ -400,121 +1097,88 @@ function renderStudentForm(data, locale) {
 
 function renderTeachers(data) {
   const { locale } = appState;
-  const rows = data.teachers
-    .map((teacher) => `<tr><td><strong>${personName(teacher, locale)}</strong><div class="muted">${teacher.employeeNumber}</div></td><td>${teacher.speciality}</td><td>${teacher.rank}</td><td>${teacher.email}</td><td>${badge(t(locale, `status.${teacher.status}`), teacher.status === 'active' ? 'success' : 'secondary')}</td></tr>`)
-    .join('');
-  return section(t(locale, 'nav.teachers'), `<div class="table-toolbar"><input class="form-control" data-filter-table="teachersTable" placeholder="${t(locale, 'actions.search')}"></div><div class="table-responsive"><table class="table align-middle searchable-table" id="teachersTable"><thead><tr><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th><th>${locale === 'ar' ? 'التخصص' : 'Spécialité'}</th><th>${locale === 'ar' ? 'الرتبة' : 'Grade'}</th><th>Email</th><th>${locale === 'ar' ? 'الحالة' : 'Statut'}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
-}
-
-function renderAcademic(data) {
-  const { locale } = appState;
-  const programs = data.programs.map((program) => `<tr><td><strong>${localName(program, locale)}</strong><div class="muted">${program.code}</div></td><td>${program.department}</td><td>${program.degreeType}</td><td>${program.duration}</td></tr>`).join('');
-  const subjects = data.subjects.map((subject) => `<tr><td>${localName(subject, locale)}</td><td>${subject.code}</td><td>${localName(byId(data.modules, subject.moduleId), locale)}</td><td>${subject.coefficient}</td><td>${subject.hours}h</td></tr>`).join('');
-  return `
-    ${section(locale === 'ar' ? 'المسالك' : 'Filières', `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'الشعبة' : 'Département'}</th><th>${locale === 'ar' ? 'الشهادة' : 'Diplôme'}</th><th>${locale === 'ar' ? 'المدة' : 'Durée'}</th></tr></thead><tbody>${programs}</tbody></table></div>`)}
-    ${section(locale === 'ar' ? 'المواد والوحدات' : 'Matières et modules', `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>Code</th><th>${locale === 'ar' ? 'الوحدة' : 'Module'}</th><th>Coef.</th><th>Heures</th></tr></thead><tbody>${subjects}</tbody></table></div>`)}
-    ${section(locale === 'ar' ? 'القاعات' : 'Salles', `<div class="room-grid">${data.rooms.map((room) => `<div class="room-tile"><strong>${room.code}</strong><span>${room.building}</span><span>${room.type} · ${room.capacity}</span></div>`).join('')}</div>`)}
-  `;
-}
-
-function renderEnrollments(data) {
-  const { locale } = appState;
-  const rows = data.enrollments.map((enrollment) => {
-    const student = byId(data.students, enrollment.studentId);
-    return `<tr><td>${personName(student, locale)}</td><td>${localName(byId(data.programs, enrollment.programId), locale)}</td><td>${localName(byId(data.levels, enrollment.levelId), locale, 'label')}</td><td>${byId(data.groups, enrollment.groupId)?.code ?? '-'}</td><td>${badge(enrollment.status, 'success')}</td></tr>`;
+  const rows = data.teachers.map((teacher) => {
+    const assignmentCount = data.teacherAssignments.filter((assignment) => assignment.teacherId === teacher.id).length;
+    return `<tr><td><strong>${personName(teacher, locale)}</strong><div class="muted">${teacher.employeeNumber}</div></td><td>${escapeHtml(teacher.speciality)}</td><td>${escapeHtml(teacher.rank)}</td><td>${escapeHtml(teacher.email)}</td><td>${assignmentCount}</td></tr>`;
   }).join('');
-  return section(t(locale, 'nav.enrollments'), `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'المستوى' : 'Niveau'}</th><th>${locale === 'ar' ? 'المجموعة' : 'Groupe'}</th><th>${locale === 'ar' ? 'الحالة' : 'Statut'}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+  return section(t(locale, 'nav.teachers'), `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th><th>${locale === 'ar' ? 'التخصص' : 'Spécialité'}</th><th>${locale === 'ar' ? 'الرتبة' : 'Grade'}</th><th>Email</th><th>${locale === 'ar' ? 'مواد' : 'Matières'}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
-function renderAssignments(data) {
+function renderSchool(data) {
   const { locale } = appState;
-  const rows = data.teachingAssignments.map((assignment) => `<tr><td>${personName(byId(data.teachers, assignment.teacherId), locale)}</td><td>${localName(byId(data.subjects, assignment.subjectId), locale)}</td><td>${assignment.groupIds.map((idValue) => byId(data.groups, idValue)?.code).join(', ')}</td><td>${byId(data.semesters, assignment.semesterId)?.code ?? '-'}</td></tr>`).join('');
-  return section(t(locale, 'nav.assignments'), `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'المجموعات' : 'Groupes'}</th><th>${locale === 'ar' ? 'السداسي' : 'Semestre'}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
-}
-
-function renderScheduleTable(entries, data, locale) {
-  if (!entries.length) return emptyState(locale === 'ar' ? 'لا توجد حصص' : 'Aucune séance');
-  return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'اليوم' : 'Jour'}</th><th>${locale === 'ar' ? 'الوقت' : 'Heure'}</th><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th><th>${locale === 'ar' ? 'المجموعة' : 'Groupe'}</th><th>${locale === 'ar' ? 'القاعة' : 'Salle'}</th></tr></thead><tbody>${entries.map((entry) => `<tr><td>${locale === 'ar' ? weekdayKeysAr[entry.weekday] : weekdayKeys[entry.weekday]}</td><td>${entry.startTime} - ${entry.endTime}</td><td>${localName(byId(data.subjects, entry.subjectId), locale)}</td><td>${personName(byId(data.teachers, entry.teacherId), locale)}</td><td>${byId(data.groups, entry.groupId)?.code ?? '-'}</td><td>${byId(data.rooms, entry.roomId)?.code ?? '-'}</td></tr>`).join('')}</tbody></table></div>`;
-}
-
-function renderSchedule(data) {
-  const { locale } = appState;
-  const fields = `
-    ${formField(locale === 'ar' ? 'المادة' : 'Matière', `<select class="form-select" name="subjectId">${optionTags(data.subjects, 'sub-db', locale)}</select>`)}
-    ${formField(locale === 'ar' ? 'الأستاذ' : 'Enseignant', `<select class="form-select" name="teacherId">${data.teachers.map((teacher) => `<option value="${teacher.id}">${personName(teacher, locale)}</option>`).join('')}</select>`)}
-    ${formField(locale === 'ar' ? 'المجموعة' : 'Groupe', `<select class="form-select" name="groupId">${optionTags(data.groups, 'grp-cs-2a', locale, 'code')}</select>`)}
-    ${formField(locale === 'ar' ? 'القاعة' : 'Salle', `<select class="form-select" name="roomId">${optionTags(data.rooms, 'room-a101', locale, 'code')}</select>`)}
-    ${formField(locale === 'ar' ? 'اليوم' : 'Jour', '<input class="form-control" name="weekday" type="number" min="1" max="6" value="1">')}
-    ${formField(locale === 'ar' ? 'بداية الحصة' : 'Début', '<input class="form-control" name="startTime" type="time" value="09:30">')}
-    ${formField(locale === 'ar' ? 'نهاية الحصة' : 'Fin', '<input class="form-control" name="endTime" type="time" value="11:00">')}
-  `;
-  const title = locale === 'ar' ? 'اختبار تعارض الحصص' : 'Tester un conflit planning';
+  const schemaRows = Object.entries(DATABASE_TABLES).map(([table, columns]) => `<tr><td><strong>${table}</strong></td><td><code>${columns.join('</code>, <code>')}</code></td></tr>`).join('');
+  const filiereCards = data.filieres.map((filiere) => {
+    const semesters = data.semesters.filter((semester) => semester.filiereId === filiere.id);
+    return `<div class="split-row"><span><strong>${localName(filiere, locale)}</strong><small>${semesters.map((semester) => `${semester.code}: ${data.subjects.filter((subject) => subject.semesterId === semester.id).length} matières`).join(' · ')}</small></span><span>${filiere.code}</span></div>`;
+  }).join('');
+  const subjectRows = data.subjects.map((subject) => {
+    const assignment = data.teacherAssignments.find((item) => item.subjectId === subject.id);
+    return `<tr><td>${localName(byId(data.filieres, subject.filiereId), locale)}</td><td>${byId(data.semesters, subject.semesterId)?.code}</td><td><strong>${localName(subject, locale)}</strong><div class="muted">${subject.code}</div></td><td>${personName(byId(data.teachers, assignment?.teacherId), locale)}</td><td>${subject.coefficient}</td><td>${subject.hours}h</td></tr>`;
+  }).join('');
   return `
-    ${section(
-      t(locale, 'nav.schedule'),
-      renderScheduleTable(data.scheduleEntries, data, locale),
-      `<button class="btn btn-primary" data-action="open-modal" data-target="scheduleConflictModal"><i class="bi bi-search"></i>${title}</button>`
-    )}
-    ${renderFormModal({
-      id: 'scheduleConflictModal',
-      title,
-      formId: 'scheduleForm',
-      fields,
-      submitLabel: locale === 'ar' ? 'تحقق' : 'Vérifier',
-      submitIcon: 'search',
-      result: '<div id="scheduleResult" class="form-modal-result"></div>'
-    })}`;
+    ${section(locale === 'ar' ? 'المسالك والسداسيات' : 'Filières et semestres', `<div class="split-list">${filiereCards}</div>`)}
+    ${section(locale === 'ar' ? 'المواد والأساتذة' : 'Matières et enseignants', `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'السداسي' : 'Semestre'}</th><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th><th>Coef.</th><th>Heures</th></tr></thead><tbody>${subjectRows}</tbody></table></div>`)}
+    ${section(locale === 'ar' ? 'تصميم قاعدة البيانات' : 'Conception relationnelle des données', `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Table</th><th>Colonnes</th></tr></thead><tbody>${schemaRows}</tbody></table></div>`)}
+  `;
+}
+
+function renderTimetableTable(rows, locale) {
+  if (!rows.length) return emptyState(locale === 'ar' ? 'لا توجد حصص' : 'Aucune séance');
+  return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'اليوم' : 'Jour'}</th><th>${locale === 'ar' ? 'الوقت' : 'Heure'}</th><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'السداسي' : 'Semestre'}</th><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th></tr></thead><tbody>${rows.map(({ entry, filiere, semester, subject, teacher }) => `<tr><td>${locale === 'ar' ? weekdayKeysAr[entry.weekday] : weekdayKeys[entry.weekday]}</td><td>${entry.startTime} - ${entry.endTime}</td><td>${localName(filiere, locale)}</td><td>${semester?.code ?? '-'}</td><td>${localName(subject, locale)}</td><td>${personName(teacher, locale)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+async function renderTimetable(data) {
+  const rows = await appState.schedule.getTimetable();
+  return section(t(appState.locale, 'nav.timetable'), renderTimetableTable(rows, appState.locale));
+}
+
+function renderTeacherSubjects(assignments, locale) {
+  if (!assignments.length) return emptyState(locale === 'ar' ? 'لا توجد مواد' : 'Aucune matière');
+  return `<div class="split-list">${assignments.map(({ subject, filiere, semester }) => `<a href="#/gradebook/${subject.id}" class="split-row"><span><strong>${localName(subject, locale)}</strong><small>${localName(filiere, locale)} · ${semester.code}</small></span><i class="bi bi-arrow-${getDirection(locale) === 'rtl' ? 'left' : 'right'}"></i></a>`).join('')}</div>`;
+}
+
+async function renderTeacherSubjectsPage(data) {
+  const assignments = await appState.schedule.getTeacherAssignments(appState.user.linkedProfileId);
+  return section(t(appState.locale, 'nav.mySubjects'), renderTeacherSubjects(assignments, appState.locale));
 }
 
 function renderGradesOverview(data) {
   const { locale } = appState;
-  const rows = data.students.map((student) => `<tr><td>${personName(student, locale)}</td><td>${student.registrationNumber}</td><td data-grade-mark-student="${student.id}">...</td><td data-grade-appreciation-student="${student.id}">...</td></tr>`).join('');
-  queueMicrotask(async () => {
-    for (const student of data.students) {
-      const result = await appState.grades.getSubjectAverage(student.id, 'sub-algo');
-      const markCell = document.querySelector(`[data-grade-mark-student="${student.id}"]`);
-      const appreciationCell = document.querySelector(`[data-grade-appreciation-student="${student.id}"]`);
-      if (markCell) markCell.textContent = result.publishable ? `${result.average}/20` : '-';
-      if (appreciationCell) appreciationCell.innerHTML = result.publishable ? badge(result.mention, result.validated ? 'success' : 'danger') : badge(locale === 'ar' ? 'غير منشور' : 'Non publié', 'warning');
-    }
-  });
-  return section(t(locale, 'nav.grades'), `<div class="table-responsive"><table class="table align-middle grades-overview-table"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'رقم التسجيل' : 'N° inscription'}</th><th>${locale === 'ar' ? 'النقطة /20' : 'Note /20'}</th><th>${locale === 'ar' ? 'التقدير' : 'Appréciation'}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
-}
-
-function renderTeacherCourses(data, teacherId = appState.user.linkedProfileId) {
-  const { locale } = appState;
-  const assignments = data.teachingAssignments.filter((assignment) => assignment.teacherId === teacherId);
-  return `<div class="split-list">${assignments.map((assignment) => `<a href="#/gradebook/${assignment.subjectId}" class="split-row"><span><strong>${localName(byId(data.subjects, assignment.subjectId), locale)}</strong><small>${assignment.groupIds.map((idValue) => byId(data.groups, idValue)?.code).join(', ')}</small></span><i class="bi bi-arrow-${getDirection(locale) === 'rtl' ? 'left' : 'right'}"></i></a>`).join('')}</div>`;
+  const rows = data.grades.map((grade) => {
+    const student = byId(data.students, grade.studentId);
+    const subject = byId(data.subjects, grade.subjectId);
+    return `<tr><td><strong>${personName(student, locale)}</strong><div class="muted">${student.registrationNumber}</div></td><td>${localName(byId(data.filieres, student.filiereId), locale)}</td><td>${byId(data.semesters, grade.semesterId)?.code}</td><td>${localName(subject, locale)}</td><td data-grade-mark-student="${student.id}">${grade.mark}/20</td><td data-grade-appreciation-student="${student.id}">${escapeHtml(grade.appreciation)}</td><td>${personName(byId(data.teachers, grade.teacherId), locale)}</td></tr>`;
+  }).join('');
+  return section(t(locale, 'nav.grades'), `<div class="table-responsive"><table class="table align-middle grades-overview-table"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'السداسي' : 'Semestre'}</th><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'النقطة /20' : 'Note /20'}</th><th>${locale === 'ar' ? 'التقدير' : 'Appréciation'}</th><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
 function renderGradebook(data) {
   const { locale, user } = appState;
-  const subjectId = location.hash.split('/')[2] ?? data.teachingAssignments.find((assignment) => assignment.teacherId === user.linkedProfileId)?.subjectId ?? 'sub-algo';
-  const assignment = data.teachingAssignments.find((item) => item.teacherId === user.linkedProfileId && item.subjectId === subjectId);
-  const students = data.students.filter((student) => assignment?.groupIds.includes(student.groupId));
-  const assessments = data.assessments.filter((assessment) => assessment.subjectId === subjectId);
-  const assessmentId = assessments[0]?.id;
+  const teacherAssignments = data.teacherAssignments.filter((assignment) => assignment.teacherId === user.linkedProfileId);
+  const subjectId = location.hash.split('/')[2] ?? teacherAssignments[0]?.subjectId;
+  const assignment = teacherAssignments.find((item) => item.subjectId === subjectId) ?? teacherAssignments[0];
+  if (!assignment) return section(t(locale, 'nav.gradebook'), emptyState(locale === 'ar' ? 'لا توجد مواد' : 'Aucune matière affectée'));
+  const subject = byId(data.subjects, assignment.subjectId);
+  const students = data.students.filter((student) => student.filiereId === assignment.filiereId && student.currentSemesterId === assignment.semesterId);
   const rows = students.map((student) => {
-    const grade = data.grades.find((item) => item.studentId === student.id && item.assessmentId === assessmentId);
-    return `<tr><td>${personName(student, locale)}</td><td>${student.registrationNumber}</td><td><input class="form-control form-control-sm" name="mark-${student.id}" type="number" min="0" max="20" step="0.25" value="${grade?.mark ?? ''}"></td><td><select class="form-select form-select-sm" name="absence-${student.id}"><option value="">-</option><option value="excused" ${grade?.absence === 'excused' ? 'selected' : ''}>Excusée</option><option value="unexcused" ${grade?.absence === 'unexcused' ? 'selected' : ''}>Non excusée</option></select></td></tr>`;
+    const grade = data.grades.find((item) => item.studentId === student.id && item.subjectId === assignment.subjectId && item.semesterId === assignment.semesterId);
+    return `<tr><td><strong>${personName(student, locale)}</strong><div class="muted">${student.registrationNumber}</div></td><td><input class="form-control form-control-sm" name="mark-${student.id}" type="number" min="0" max="20" step="0.25" value="${grade?.mark ?? ''}"></td><td><input class="form-control form-control-sm" name="appreciation-${student.id}" value="${escapeHtml(grade?.appreciation ?? '')}"></td></tr>`;
   }).join('');
   return `
-    ${section(t(locale, 'nav.myCourses'), renderTeacherCourses(data))}
+    ${section(t(locale, 'nav.mySubjects'), renderTeacherSubjects(teacherAssignments.map((item) => ({ assignment: item, teacher: byId(data.teachers, item.teacherId), filiere: byId(data.filieres, item.filiereId), semester: byId(data.semesters, item.semesterId), subject: byId(data.subjects, item.subjectId) })), locale))}
     ${section(
-      t(locale, 'nav.gradebook'),
-      `<form id="gradebookForm" data-assessment-id="${assessmentId ?? ''}"><div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'رقم التسجيل' : 'N° inscription'}</th><th>${locale === 'ar' ? 'النقطة' : 'Note /20'}</th><th>${locale === 'ar' ? 'الغياب' : 'Absence'}</th></tr></thead><tbody>${rows}</tbody></table></div><button class="btn btn-primary"><i class="bi bi-save"></i>${t(locale, 'actions.save')}</button></form>`
+      `${t(locale, 'nav.gradebook')} · ${localName(subject, locale)}`,
+      `<form id="gradebookForm" data-subject-id="${assignment.subjectId}" data-semester-id="${assignment.semesterId}"><div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'النقطة' : 'Note /20'}</th><th>${locale === 'ar' ? 'التقدير' : 'Appréciation'}</th></tr></thead><tbody>${rows}</tbody></table></div><button class="btn btn-primary"><i class="bi bi-save"></i>${t(locale, 'actions.save')}</button></form>`
     )}`;
 }
 
 async function renderStudentGrades(data) {
-  const { locale, user } = appState;
-  const studentId = user.linkedProfileId;
-  const transcript = await appState.grades.getStudentTranscript(studentId);
-  return section(t(locale, 'nav.myGrades'), renderTranscriptTable(transcript, locale));
+  const transcript = await appState.grades.getStudentTranscript(appState.user.linkedProfileId);
+  return section(t(appState.locale, 'nav.myGrades'), renderTranscriptTable(transcript, appState.locale));
 }
 
-export function renderTranscriptTable(transcript, locale) {
-  return `<div class="transcript">${transcript.map((module) => `<div class="transcript-module"><div class="transcript-module-head"><h3>${localName(module.module, locale)}</h3><span>${module.result.average ?? '-'}/20</span></div><div class="table-responsive"><table class="table table-sm transcript-table"><colgroup><col class="transcript-col-subject"><col class="transcript-col-average"><col class="transcript-col-result"><col class="transcript-col-mention"></colgroup><thead><tr><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'المعدل' : 'Moyenne'}</th><th>${locale === 'ar' ? 'النتيجة' : 'Résultat'}</th><th>${locale === 'ar' ? 'الميزة' : 'Mention'}</th></tr></thead><tbody>${module.subjects.map((row) => `<tr><td>${localName(row.subject, locale)}</td><td>${row.result.average ?? '-'}</td><td>${row.result.validated ? badge(t(locale, 'status.validated'), 'success') : badge(row.result.publishable ? t(locale, 'status.failed') : locale === 'ar' ? 'معلق' : 'En attente', row.result.publishable ? 'danger' : 'warning')}</td><td>${row.result.mention}</td></tr>`).join('')}</tbody></table></div></div>`).join('')}</div>`;
+function renderTranscriptTable(transcript, locale) {
+  return `<div class="transcript"><div class="table-responsive"><table class="table table-sm transcript-table"><colgroup><col class="transcript-col-subject"><col class="transcript-col-teacher"><col class="transcript-col-mark"><col class="transcript-col-appreciation"></colgroup><thead><tr><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th><th>${locale === 'ar' ? 'النقطة /20' : 'Note /20'}</th><th>${locale === 'ar' ? 'التقدير' : 'Appréciation'}</th></tr></thead><tbody>${transcript.map((row) => `<tr><td><strong>${localName(row.subject, locale)}</strong><div class="muted">${row.semester.code}</div></td><td>${personName(row.teacher, locale)}</td><td>${row.mark === null ? '-' : `${row.mark}/20`}</td><td>${escapeHtml(row.appreciation)}</td></tr>`).join('')}</tbody></table></div></div>`;
 }
 
 async function renderTranscript(data) {
@@ -523,27 +1187,15 @@ async function renderTranscript(data) {
   const transcript = await appState.grades.getStudentTranscript(student.id);
   return section(
     t(locale, 'nav.myTranscript'),
-    `<div class="print-header"><h2>${personName(student, locale)}</h2><p>${student.registrationNumber} · ${localName(byId(data.programs, student.programId), locale)} · ${byId(data.groups, student.groupId)?.code}</p></div>${renderTranscriptTable(transcript, locale)}`,
+    `<div class="print-header"><h2>${personName(student, locale)}</h2><p>${student.registrationNumber} · ${localName(byId(data.filieres, student.filiereId), locale)} · ${byId(data.semesters, student.currentSemesterId)?.code}</p></div>${renderTranscriptTable(transcript, locale)}`,
     `<button class="btn btn-outline-secondary" data-action="print"><i class="bi bi-printer"></i>${t(locale, 'actions.print')}</button>`,
     'transcript-section'
   );
 }
 
-function renderReports(data) {
-  const { locale } = appState;
-  return `
-    <div class="metric-grid">
-      ${metric(locale === 'ar' ? 'الطلبة' : 'Étudiants', data.students.length, locale === 'ar' ? 'مسجلون' : 'inscrits', 'mortarboard')}
-      ${metric(locale === 'ar' ? 'المواد' : 'Matières', data.subjects.length, locale === 'ar' ? 'مفتوحة' : 'ouvertes', 'book')}
-      ${metric(locale === 'ar' ? 'الحصص' : 'Séances', data.scheduleEntries.length, locale === 'ar' ? 'في الجدول' : 'au planning', 'calendar3')}
-    </div>
-    ${section(t(locale, 'nav.reports'), '<div class="chart-frame"><canvas id="reportChart"></canvas></div>', `<button class="btn btn-outline-secondary" data-action="export-csv" data-collection="students"><i class="bi bi-filetype-csv"></i>CSV</button>`)}
-  `;
-}
-
 function renderUsers(data) {
   const { locale } = appState;
-  return section(t(locale, 'nav.users'), `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'المستخدم' : 'Utilisateur'}</th><th>Email</th><th>${locale === 'ar' ? 'الدور' : 'Rôle'}</th><th>${locale === 'ar' ? 'اللغة' : 'Langue'}</th></tr></thead><tbody>${data.users.map((user) => `<tr><td>${user.displayName}</td><td>${user.email}</td><td>${t(locale, `roles.${user.role}`)}</td><td>${user.locale.toUpperCase()}</td></tr>`).join('')}</tbody></table></div>`);
+  return section(t(locale, 'nav.users'), `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'المستخدم' : 'Utilisateur'}</th><th>Email</th><th>${locale === 'ar' ? 'الدور' : 'Rôle'}</th><th>${locale === 'ar' ? 'اللغة' : 'Langue'}</th></tr></thead><tbody>${data.users.map((user) => `<tr><td>${escapeHtml(user.displayName)}</td><td>${escapeHtml(user.email)}</td><td>${t(locale, `roles.${user.role}`)}</td><td>${user.locale.toUpperCase()}</td></tr>`).join('')}</tbody></table></div>`);
 }
 
 function renderSettings(locale) {
@@ -564,11 +1216,13 @@ async function renderProfile(data) {
   return section(t(locale, 'nav.profile'), `<div class="profile-panel"><div class="avatar huge">${escapeHtml(user.avatar)}</div><div><h2>${escapeHtml(name)}</h2><p>${escapeHtml(user.email)}</p><p>${t(locale, `roles.${user.role}`)}</p></div></div>`);
 }
 
-async function renderStudentProgram(data) {
+async function renderStudentFiliere(data) {
   const { locale, user } = appState;
   const student = byId(data.students, user.linkedProfileId);
-  const enrollment = data.enrollments.find((item) => item.studentId === student.id);
-  return section(t(locale, 'nav.myProgram'), `<dl class="detail-list"><dt>${locale === 'ar' ? 'المسلك' : 'Filière'}</dt><dd>${localName(byId(data.programs, enrollment.programId), locale)}</dd><dt>${locale === 'ar' ? 'المستوى' : 'Niveau'}</dt><dd>${localName(byId(data.levels, enrollment.levelId), locale, 'label')}</dd><dt>${locale === 'ar' ? 'المجموعة' : 'Groupe'}</dt><dd>${byId(data.groups, enrollment.groupId)?.code}</dd><dt>${locale === 'ar' ? 'السنة الجامعية' : 'Année universitaire'}</dt><dd>${byId(data.academicYears, enrollment.academicYearId)?.label}</dd></dl>`);
+  const filiere = byId(data.filieres, student.filiereId);
+  const semester = byId(data.semesters, student.currentSemesterId);
+  const subjects = data.subjects.filter((subject) => subject.filiereId === student.filiereId && subject.semesterId === student.currentSemesterId);
+  return section(t(locale, 'nav.myFiliere'), `<dl class="detail-list"><dt>${locale === 'ar' ? 'المسلك' : 'Filière'}</dt><dd>${localName(filiere, locale)}</dd><dt>${locale === 'ar' ? 'السداسي' : 'Semestre'}</dt><dd>${localName(semester, locale, 'label')}</dd><dt>${locale === 'ar' ? 'المواد' : 'Matières'}</dt><dd>${subjects.map((subject) => localName(subject, locale)).join(', ')}</dd></dl>`);
 }
 
 async function renderRoute() {
@@ -603,29 +1257,14 @@ async function renderRoute() {
     case '#/teachers':
       content = renderTeachers(data);
       break;
-    case '#/programs':
-    case '#/academic-structure':
-      content = renderAcademic(data);
+    case '#/school':
+      content = renderSchool(data);
       break;
-    case '#/enrollments':
-      content = renderEnrollments(data);
-      break;
-    case '#/assignments':
-      content = renderAssignments(data);
-      break;
-    case '#/schedule':
-    case '#/my-schedule':
-      content = appState.user.role === 'student'
-        ? section(t(locale, 'nav.mySchedule'), renderScheduleTable(data.scheduleEntries.filter((entry) => entry.groupId === byId(data.students, appState.user.linkedProfileId)?.groupId), data, locale))
-        : appState.user.role === 'teacher'
-          ? section(t(locale, 'nav.mySchedule'), renderScheduleTable(data.scheduleEntries.filter((entry) => entry.teacherId === appState.user.linkedProfileId), data, locale))
-          : renderSchedule(data);
+    case '#/timetable':
+      content = await renderTimetable(data);
       break;
     case '#/grades':
       content = renderGradesOverview(data);
-      break;
-    case '#/reports':
-      content = renderReports(data);
       break;
     case '#/users':
       content = renderUsers(data);
@@ -633,17 +1272,19 @@ async function renderRoute() {
     case '#/settings':
       content = renderSettings(locale);
       break;
-    case '#/my-courses':
-      content = section(t(locale, 'nav.myCourses'), renderTeacherCourses(data));
-      break;
-    case '#/my-groups':
-      content = renderEnrollments({ ...data, enrollments: data.enrollments.filter((enrollment) => data.teachingAssignments.some((assignment) => assignment.teacherId === appState.user.linkedProfileId && assignment.groupIds.includes(enrollment.groupId))) });
+    case '#/my-subjects':
+      content = await renderTeacherSubjectsPage(data);
       break;
     case '#/gradebook':
       content = renderGradebook(data);
       break;
-    case '#/my-program':
-      content = await renderStudentProgram(data);
+    case '#/my-schedule':
+      content = appState.user.role === 'student'
+        ? section(t(locale, 'nav.mySchedule'), renderTimetableTable(await appState.schedule.getStudentTimetable(appState.user.linkedProfileId), locale))
+        : section(t(locale, 'nav.mySchedule'), renderTimetableTable(await appState.schedule.getTeacherTimetable(appState.user.linkedProfileId), locale));
+      break;
+    case '#/my-filiere':
+      content = await renderStudentFiliere(data);
       break;
     case '#/my-grades':
       content = await renderStudentGrades(data);
@@ -655,7 +1296,7 @@ async function renderRoute() {
       content = section('404', locale === 'ar' ? 'الصفحة غير موجودة' : 'Page introuvable');
   }
 
-  root.innerHTML = renderShell(content, data);
+  root.innerHTML = renderShell(content);
   renderCharts(data);
 }
 
@@ -665,22 +1306,16 @@ function renderCharts(data) {
     activeChart.destroy();
     activeChart = null;
   }
-  const locale = appState.locale;
-  const canvas = document.getElementById('programChart') ?? document.getElementById('reportChart');
+  const canvas = document.getElementById('filiereChart');
   if (!canvas) return;
-  const counts = data.programs.map((program) => data.students.filter((student) => student.programId === program.id).length);
+  const locale = appState.locale;
   activeChart = new Chart(canvas, {
-    type: document.getElementById('reportChart') ? 'bar' : 'doughnut',
+    type: 'doughnut',
     data: {
-      labels: data.programs.map((program) => localName(program, locale)),
-      datasets: [{ data: counts, backgroundColor: ['#123b68', '#f5bd2b', '#3e7cb1'] }]
+      labels: data.filieres.map((filiere) => localName(filiere, locale)),
+      datasets: [{ data: data.filieres.map((filiere) => data.students.filter((student) => student.filiereId === filiere.id).length), backgroundColor: ['#123b68', '#f5bd2b', '#3e7cb1'] }]
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { position: 'bottom' } },
-      scales: document.getElementById('reportChart') ? { y: { beginAtZero: true, ticks: { precision: 0 } } } : undefined
-    }
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
   });
 }
 
@@ -757,7 +1392,7 @@ async function handleSubmit(event) {
     event.preventDefault();
     const payload = Object.fromEntries(new FormData(form).entries());
     try {
-      await appState.academic.createStudentWithEnrollment(payload);
+      await appState.academic.createStudent(payload);
       showToast(t(appState.locale, 'toast.saved'));
       closeModal(form.closest('.modal'));
       await renderRoute();
@@ -766,26 +1401,18 @@ async function handleSubmit(event) {
       showInlineError(form, error.message);
     }
   }
-  if (form.id === 'scheduleForm') {
-    event.preventDefault();
-    const payload = Object.fromEntries(new FormData(form).entries());
-    payload.weekday = Number(payload.weekday);
-    const result = await appState.schedule.validateEntry(payload);
-    document.getElementById('scheduleResult').innerHTML = result.valid
-      ? `<div class="alert alert-success">${appState.locale === 'ar' ? 'لا يوجد تعارض.' : 'Aucun conflit détecté.'}</div>`
-      : `<div class="alert alert-warning"><strong>${appState.locale === 'ar' ? 'تعارضات:' : 'Conflits :'}</strong> ${result.conflicts.map((item) => item.type).join(', ')}</div>`;
-  }
   if (form.id === 'gradebookForm') {
     event.preventDefault();
     const data = await loadData();
-    const assessmentId = form.dataset.assessmentId;
-    const assignment = data.teachingAssignments.find((item) => item.teacherId === appState.user.linkedProfileId && data.assessments.find((assessment) => assessment.id === assessmentId)?.subjectId === item.subjectId);
-    const students = data.students.filter((student) => assignment?.groupIds.includes(student.groupId));
+    const subjectId = form.dataset.subjectId;
+    const semesterId = form.dataset.semesterId;
+    const subject = byId(data.subjects, subjectId);
+    const students = data.students.filter((student) => student.filiereId === subject.filiereId && student.currentSemesterId === semesterId);
     for (const student of students) {
       const mark = form.elements[`mark-${student.id}`].value;
-      const absence = form.elements[`absence-${student.id}`].value || null;
-      if (mark || absence) {
-        await appState.grades.saveGrade({ actorUserId: appState.user.id, assessmentId, studentId: student.id, mark: mark || 0, absence, comment: '' });
+      const appreciation = form.elements[`appreciation-${student.id}`].value;
+      if (mark) {
+        await appState.grades.saveGrade({ actorUserId: appState.user.id, studentId: student.id, subjectId, semesterId, mark, appreciation });
       }
     }
     showToast(t(appState.locale, 'toast.saved'));
@@ -820,8 +1447,7 @@ async function handleClick(event) {
     await renderRoute();
   }
   if (action === 'open-modal') {
-    const modalElement = document.getElementById(target.dataset.target);
-    openModal(modalElement);
+    openModal(document.getElementById(target.dataset.target));
   }
   if (action === 'close-modal') {
     closeModal(document.getElementById(target.dataset.target));
@@ -836,9 +1462,6 @@ async function handleClick(event) {
   }
   if (action === 'export-json') {
     download('uniflow-backup.json', JSON.stringify(await appState.adapter.exportDatabase(), null, 2));
-  }
-  if (action === 'export-csv') {
-    download(`${target.dataset.collection}.csv`, await appState.academic.exportCsv(target.dataset.collection), 'text/csv');
   }
   if (action === 'reset-db' && confirm(appState.locale === 'ar' ? 'إعادة بيانات العرض؟' : 'Réinitialiser les données de démonstration ?')) {
     await appState.academic.resetDemoData();
@@ -890,7 +1513,7 @@ async function restoreSession(repositories) {
   }
 }
 
-export async function startApp({ root = document.getElementById('app'), storageKey = 'uniflow.database' } = {}) {
+async function startApp({ root = document.getElementById('app'), storageKey = 'uniflow.database' } = {}) {
   const adapter = new LocalStorageAdapter({ key: storageKey, seedFactory: createSeedDatabase });
   await adapter.initialize();
   const repositories = createRepositories(adapter);
