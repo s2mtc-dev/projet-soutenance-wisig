@@ -297,6 +297,16 @@ test('page action forms use organized Bootstrap modals with full-width submit fo
   assert.match(cssSource, /\.form-modal-footer\s*{/);
 });
 
+test('workspace animation does not trap Bootstrap modals under the backdrop', () => {
+  const cssSource = readFileSync(new URL('../assets/css/app.css', import.meta.url), 'utf8');
+  const htmlSource = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(cssSource, /\.workspace\s*{[^}]*animation:[^;}]*\bboth\b/s);
+  assert.doesNotMatch(cssSource, /@keyframes\s+workspace-in\s*{\s*from\s*{[^}]*transform:/s);
+  assert.doesNotMatch(cssSource, /@keyframes\s+workspace-in\s*{[\s\S]*to\s*{[^}]*transform:/s);
+  assert.match(htmlSource, /href="\.\/assets\/css\/app\.css\?v=[^"]+"/);
+});
+
 test('large profile avatar keeps circular dimensions inside flex rows', () => {
   const cssSource = readFileSync(new URL('../assets/css/app.css', import.meta.url), 'utf8');
 
