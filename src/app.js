@@ -323,6 +323,8 @@ const dictionaries = {
     'actions.add': 'Ajouter',
     'actions.archive': 'Archiver',
     'actions.cancel': 'Annuler',
+    'actions.delete': 'Supprimer',
+    'actions.edit': 'Modifier',
     'actions.export': 'Exporter',
     'actions.import': 'Importer',
     'actions.login': 'Se connecter',
@@ -369,6 +371,8 @@ const dictionaries = {
     'actions.add': 'إضافة',
     'actions.archive': 'أرشفة',
     'actions.cancel': 'إلغاء',
+    'actions.delete': 'حذف',
+    'actions.edit': 'تعديل',
     'actions.export': 'تصدير',
     'actions.import': 'استيراد',
     'actions.login': 'تسجيل الدخول',
@@ -436,6 +440,45 @@ function formatDate(locale, value) {
 // Application services
 
 const COLLECTIONS = Object.keys(DATABASE_TABLES);
+const ADMIN_CRUD_ENTITIES = COLLECTIONS.filter((collection) => collection !== 'activityLogs');
+const ENTITY_ID_PREFIXES = {
+  users: 'user',
+  filieres: 'fil',
+  semesters: 'sem',
+  subjects: 'sub',
+  teachers: 'teach',
+  teacherAssignments: 'assign',
+  students: 'stu',
+  timetableEntries: 'time',
+  grades: 'grade'
+};
+const ENTITY_NUMBER_FIELDS = {
+  filieres: ['durationSemesters'],
+  semesters: ['order'],
+  subjects: ['coefficient', 'hours'],
+  timetableEntries: ['weekday'],
+  grades: ['mark']
+};
+const ENTITY_BOOLEAN_FIELDS = { grades: ['published'] };
+const CASCADE_RELATIONS = [
+  { parent: 'filieres', child: 'semesters', foreignKey: 'filiereId' },
+  { parent: 'filieres', child: 'subjects', foreignKey: 'filiereId' },
+  { parent: 'filieres', child: 'students', foreignKey: 'filiereId' },
+  { parent: 'filieres', child: 'teacherAssignments', foreignKey: 'filiereId' },
+  { parent: 'filieres', child: 'timetableEntries', foreignKey: 'filiereId' },
+  { parent: 'semesters', child: 'subjects', foreignKey: 'semesterId' },
+  { parent: 'semesters', child: 'students', foreignKey: 'currentSemesterId' },
+  { parent: 'semesters', child: 'teacherAssignments', foreignKey: 'semesterId' },
+  { parent: 'semesters', child: 'timetableEntries', foreignKey: 'semesterId' },
+  { parent: 'semesters', child: 'grades', foreignKey: 'semesterId' },
+  { parent: 'subjects', child: 'teacherAssignments', foreignKey: 'subjectId' },
+  { parent: 'subjects', child: 'timetableEntries', foreignKey: 'subjectId' },
+  { parent: 'subjects', child: 'grades', foreignKey: 'subjectId' },
+  { parent: 'teachers', child: 'teacherAssignments', foreignKey: 'teacherId' },
+  { parent: 'teachers', child: 'timetableEntries', foreignKey: 'teacherId' },
+  { parent: 'teachers', child: 'grades', foreignKey: 'teacherId' },
+  { parent: 'students', child: 'grades', foreignKey: 'studentId' }
+];
 
 const ROLE_ROUTES = {
   admin: ['#/dashboard', '#/profile', '#/students', '#/teachers', '#/school', '#/timetable', '#/grades', '#/users', '#/settings'],
@@ -466,7 +509,7 @@ class AuthService {
 
   async login(email, password) {
     const users = await this.repositories.users.list({ includeArchived: true });
-    const user = users.find((candidate) => candidate.email.toLowerCase() === email.toLowerCase() && candidate.password === password);
+    const user = users.find((candidate) => candidate.status !== 'archived' && candidate.email.toLowerCase() === email.toLowerCase() && candidate.password === password);
     if (!user) {
       throw new Error('Invalid credentials');
     }
@@ -668,54 +711,197 @@ class AcademicService {
     this.adapter = adapter;
   }
 
-  async createStudent(input) {
-    if (await this.repositories.students.findBy('registrationNumber', input.registrationNumber)) {
-      throw new Error('Registration number already exists');
-    }
-    if (await this.repositories.users.findBy('email', input.email)) {
-      throw new Error('Email already exists');
+  async saveEntity(entity, recordId, input, actorUserId) {
+    if (!ADMIN_CRUD_ENTITIES.includes(entity)) {
+      throw new Error('This entity cannot be managed');
     }
 
-    const student = await this.repositories.students.create({
-      id: id('stu'),
-      ...input,
-      status: 'active'
-    });
-    await this.repositories.users.create({
-      id: id('user'),
-      displayName: `${input.firstNameFr} ${input.lastNameFr}`,
-      email: input.email,
-      password: 'demo123',
-      role: 'student',
-      linkedProfileId: student.id,
-      locale: 'fr',
-      avatar: `${input.firstNameFr[0] ?? 'E'}${input.lastNameFr[0] ?? 'T'}`
-    });
+    const payload = this.normalizeEntityPayload(entity, input);
+    await this.validateEntity(entity, recordId, payload);
+    const repository = this.repositories[entity];
+    const record = recordId
+      ? await repository.update(recordId, payload)
+      : await repository.create({ id: id(ENTITY_ID_PREFIXES[entity]), status: 'active', ...payload });
+
+    if (['students', 'teachers'].includes(entity)) {
+      await this.syncProfileUser(entity, record, !recordId);
+    }
+    await this.logChange(actorUserId, `${entity}:${recordId ? 'updated' : 'created'}`, entity, record.id);
+    return record;
+  }
+
+  normalizeEntityPayload(entity, input) {
+    const payload = { ...input };
+    for (const field of ENTITY_NUMBER_FIELDS[entity] ?? []) {
+      payload[field] = Number(payload[field]);
+    }
+    for (const field of ENTITY_BOOLEAN_FIELDS[entity] ?? []) {
+      payload[field] = payload[field] === true || payload[field] === 'true';
+    }
+    if (entity === 'grades') {
+      payload.gradedAt = payload.gradedAt || new Date().toISOString();
+    }
+    if (entity === 'users' && !payload.linkedProfileId) {
+      payload.linkedProfileId = null;
+    }
+    return payload;
+  }
+
+  async validateEntity(entity, recordId, payload) {
+    const uniqueFields = {
+      students: ['registrationNumber', 'email'],
+      teachers: ['employeeNumber', 'email'],
+      filieres: ['code'],
+      subjects: ['code'],
+      users: ['email']
+    };
+    for (const field of uniqueFields[entity] ?? []) {
+      const existing = await this.repositories[entity].findBy(field, payload[field]);
+      if (existing && existing.id !== recordId) {
+        throw new Error(`${field} already exists`);
+      }
+    }
+
+    const filiere = payload.filiereId ? await this.repositories.filieres.getById(payload.filiereId) : null;
+    const semester = payload.semesterId
+      ? await this.repositories.semesters.getById(payload.semesterId)
+      : payload.currentSemesterId
+        ? await this.repositories.semesters.getById(payload.currentSemesterId)
+        : null;
+    const subject = payload.subjectId ? await this.repositories.subjects.getById(payload.subjectId) : null;
+
+    if (payload.filiereId && !filiere) throw new Error('Filière not found');
+    if ((payload.semesterId || payload.currentSemesterId) && !semester) {
+      throw new Error('Semester not found');
+    }
+    if (payload.filiereId && semester && semester.filiereId !== payload.filiereId) {
+      throw new Error('The semester must belong to the selected filière');
+    }
+    if (payload.subjectId && (!subject || (payload.filiereId && subject.filiereId !== payload.filiereId) || subject.semesterId !== payload.semesterId)) {
+      throw new Error('The subject must belong to the selected filière and semester');
+    }
+    if (payload.teacherId && !(await this.repositories.teachers.getById(payload.teacherId))) {
+      throw new Error('Teacher not found');
+    }
+    if (['students', 'teachers'].includes(entity)) {
+      const emailUser = await this.repositories.users.findBy('email', payload.email);
+      if (emailUser && emailUser.linkedProfileId !== recordId) throw new Error('Email already exists');
+    }
+
+    if (entity === 'semesters') {
+      if (payload.startDate >= payload.endDate) throw new Error('End date must be after start date');
+      const duplicate = (await this.repositories.semesters.where({ filiereId: payload.filiereId }))
+        .find((item) => item.code.toLowerCase() === payload.code.toLowerCase() && item.id !== recordId);
+      if (duplicate) throw new Error('This semester code already exists in the filière');
+    }
+    if (entity === 'teacherAssignments') {
+      const duplicate = (await this.repositories.teacherAssignments.where({ subjectId: payload.subjectId }))
+        .find((item) => item.semesterId === payload.semesterId && item.academicYear === payload.academicYear && item.id !== recordId);
+      if (duplicate) throw new Error('This subject already has a teacher for the academic year');
+    }
+    if (entity === 'timetableEntries') {
+      const assignment = (await this.repositories.teacherAssignments.where({ subjectId: payload.subjectId }))
+        .find((item) => item.semesterId === payload.semesterId && item.teacherId === payload.teacherId);
+      if (!assignment) throw new Error('The selected teacher must be assigned to this subject');
+      if (payload.startTime >= payload.endTime) throw new Error('End time must be after start time');
+    }
+    if (entity === 'grades') {
+      const mark = Number(payload.mark);
+      if (mark < 0 || mark > 20) throw new Error('Mark must be between 0 and 20');
+      const student = await this.repositories.students.getById(payload.studentId);
+      if (!student || student.filiereId !== subject?.filiereId || student.currentSemesterId !== payload.semesterId) {
+        throw new Error('The student is not enrolled in this subject context');
+      }
+      const assignment = (await this.repositories.teacherAssignments.where({ subjectId: payload.subjectId }))
+        .find((item) => item.semesterId === payload.semesterId && item.teacherId === payload.teacherId);
+      if (!assignment) throw new Error('The selected teacher must be assigned to this subject');
+      const duplicate = (await this.repositories.grades.where({ studentId: payload.studentId }))
+        .find((item) => sameContext(item, payload.subjectId, payload.semesterId) && item.id !== recordId);
+      if (duplicate) throw new Error('A grade already exists for this student and subject');
+    }
+    if (entity === 'users') {
+      const linkedRepository = payload.role === 'student' ? this.repositories.students : payload.role === 'teacher' ? this.repositories.teachers : null;
+      if (payload.role === 'admin' && payload.linkedProfileId) throw new Error('An administrator cannot be linked to a profile');
+      if (linkedRepository && (!payload.linkedProfileId || !(await linkedRepository.getById(payload.linkedProfileId)))) {
+        throw new Error('Select a profile matching the user role');
+      }
+      if (payload.linkedProfileId) {
+        const linkedUser = (await this.repositories.users.where({ linkedProfileId: payload.linkedProfileId }))
+          .find((user) => user.id !== recordId);
+        if (linkedUser) throw new Error('This profile already has a user account');
+      }
+    }
+  }
+
+  async syncProfileUser(entity, profile, isNew) {
+    const role = entity === 'students' ? 'student' : 'teacher';
+    const linkedUser = (await this.repositories.users.where({ linkedProfileId: profile.id }))[0];
+    const displayName = `${profile.firstNameFr} ${profile.lastNameFr}`;
+    const changes = {
+      displayName,
+      email: profile.email,
+      role,
+      linkedProfileId: profile.id,
+      avatar: `${profile.firstNameFr[0] ?? ''}${profile.lastNameFr[0] ?? ''}`.toUpperCase(),
+      status: profile.status
+    };
+    if (linkedUser) {
+      await this.repositories.users.update(linkedUser.id, changes);
+    } else if (isNew) {
+      await this.repositories.users.create({ id: id('user'), password: 'demo123', locale: 'fr', ...changes });
+    }
+  }
+
+  async removeEntity(entity, recordId, actorUserId) {
+    if (!ADMIN_CRUD_ENTITIES.includes(entity)) throw new Error('This entity cannot be managed');
+    if (entity === 'users' && recordId === actorUserId) throw new Error('You cannot delete your active account');
+    await this.removeEntityWithRelations(entity, recordId, new Set());
+    await this.logChange(actorUserId, `${entity}:deleted`, entity, recordId);
+  }
+
+  async removeEntityWithRelations(entity, recordId, visited) {
+    const key = `${entity}:${recordId}`;
+    if (visited.has(key) || !(await this.repositories[entity].getById(recordId))) return;
+    visited.add(key);
+
+    for (const relation of CASCADE_RELATIONS.filter((item) => item.parent === entity)) {
+      const children = await this.repositories[relation.child].where({ [relation.foreignKey]: recordId });
+      for (const child of children) {
+        await this.removeEntityWithRelations(relation.child, child.id, visited);
+      }
+    }
+    if (['students', 'teachers'].includes(entity)) {
+      const users = await this.repositories.users.where({ linkedProfileId: recordId });
+      for (const user of users) await this.removeEntityWithRelations('users', user.id, visited);
+    }
+    if (entity === 'teacherAssignments') {
+      const assignment = await this.repositories.teacherAssignments.getById(recordId);
+      for (const relatedEntity of ['timetableEntries', 'grades']) {
+        const records = await this.repositories[relatedEntity].where({ subjectId: assignment.subjectId });
+        for (const record of records.filter((item) => item.semesterId === assignment.semesterId && item.teacherId === assignment.teacherId)) {
+          await this.removeEntityWithRelations(relatedEntity, record.id, visited);
+        }
+      }
+    }
+    await this.repositories[entity].remove(recordId);
+  }
+
+  async logChange(actorUserId, action, entityType, entityId) {
     await this.repositories.activityLogs.create({
       id: id('log'),
-      actorUserId: 'user-admin',
-      action: 'student:created',
-      entityType: 'student',
-      entityId: student.id,
-      summary: `Student ${student.registrationNumber} created`,
+      actorUserId,
+      action,
+      entityType,
+      entityId,
+      summary: `${entityType} ${entityId} ${action.split(':').at(-1)}`,
       timestamp: new Date().toISOString()
     });
-    return student;
   }
 
   async resetDemoData() {
     await this.adapter.replaceDatabase(createSeedDatabase());
   }
 
-  async exportCsv(collectionName) {
-    const rows = await this.repositories[collectionName].list({ includeArchived: true });
-    if (!rows.length) {
-      return '';
-    }
-    const headers = Object.keys(rows[0]);
-    const body = rows.map((row) => headers.map((header) => JSON.stringify(row[header] ?? '')).join(','));
-    return [headers.join(','), ...body].join('\n');
-  }
 }
 
 function normalizePath(path) {
@@ -796,12 +982,6 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;');
 }
 
-function optionTags(items, selectedId, locale, namePrefix = 'name') {
-  return items
-    .map((item) => `<option value="${item.id}" ${item.id === selectedId ? 'selected' : ''}>${escapeHtml(localName(item, locale, namePrefix))}</option>`)
-    .join('');
-}
-
 function routeIcon(path) {
   const icons = {
     '#/dashboard': 'speedometer2',
@@ -864,7 +1044,7 @@ function formField(label, control, className = '') {
   return `<label class="form-field ${className}"><span>${label}</span>${control}</label>`;
 }
 
-function renderFormModal({ id, title, formId, fields, submitLabel, submitIcon = 'save', result = '' }) {
+function renderFormModal({ id, title, formId, fields, submitLabel, submitIcon = 'save', result = '', formAttributes = '' }) {
   return `
     <div class="modal fade form-modal" id="${id}" tabindex="-1" aria-labelledby="${id}Title">
       <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
@@ -872,12 +1052,12 @@ function renderFormModal({ id, title, formId, fields, submitLabel, submitIcon = 
           <div class="modal-header">
             <div>
               <p class="modal-eyebrow">${appState.locale === 'ar' ? 'نموذج' : 'Formulaire'}</p>
-              <h2 class="modal-title" id="${id}Title">${title}</h2>
+              <h2 class="modal-title" id="${id}Title" data-modal-title>${title}</h2>
             </div>
             <button type="button" class="btn-close" data-action="close-modal" data-target="${id}" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body">
-            <form id="${formId}" class="form-modal-grid">
+            <form id="${formId}" class="form-modal-grid" ${formAttributes}>
               ${fields}
             </form>
             ${result}
@@ -888,6 +1068,73 @@ function renderFormModal({ id, title, formId, fields, submitLabel, submitIcon = 
         </div>
       </div>
     </div>`;
+}
+
+function crudLabels(locale, singularFr, singularAr) {
+  const singular = locale === 'ar' ? singularAr : singularFr;
+  return {
+    singular,
+    createTitle: locale === 'ar' ? `إضافة ${singular}` : `Ajouter ${singular}`,
+    editTitle: locale === 'ar' ? `تعديل ${singular}` : `Modifier ${singular}`
+  };
+}
+
+function selectItems(records, getLabel, metadata = () => ({})) {
+  return records.map((record) => ({ value: record.id, label: getLabel(record), metadata: metadata(record) }));
+}
+
+function renderFieldControl(field) {
+  if (field.type === 'select') {
+    const blank = field.allowBlank ? `<option value="">${escapeHtml(field.blankLabel ?? '—')}</option>` : '';
+    const options = field.options.map((option) => {
+      const metadata = Object.entries(option.metadata ?? {})
+        .map(([key, value]) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}="${escapeHtml(value)}"`)
+        .join(' ');
+      return `<option value="${escapeHtml(option.value)}" ${metadata}>${escapeHtml(option.label)}</option>`;
+    }).join('');
+    return `<select class="form-select" name="${field.name}" ${field.required ? 'required' : ''}>${blank}${options}</select>`;
+  }
+
+  const attributes = [
+    `type="${field.type ?? 'text'}"`,
+    `name="${field.name}"`,
+    field.required ? 'required' : '',
+    field.min !== undefined ? `min="${field.min}"` : '',
+    field.max !== undefined ? `max="${field.max}"` : '',
+    field.step !== undefined ? `step="${field.step}"` : '',
+    field.placeholder ? `placeholder="${escapeHtml(field.placeholder)}"` : ''
+  ].filter(Boolean).join(' ');
+  return `<input class="form-control" ${attributes}>`;
+}
+
+function renderEntityModal(entity, config) {
+  const fields = config.fields.map((field) => formField(field.label, renderFieldControl(field), field.wide ? 'form-field-wide' : '')).join('');
+  return renderFormModal({
+    id: `${entity}Modal`,
+    title: config.labels.createTitle,
+    formId: `${entity}Form`,
+    fields,
+    submitLabel: t(appState.locale, 'actions.save'),
+    formAttributes: `data-crud-entity="${entity}" data-create-title="${escapeHtml(config.labels.createTitle)}" data-edit-title="${escapeHtml(config.labels.editTitle)}"`
+  });
+}
+
+function renderEntityActions(entity, recordId) {
+  const locale = appState.locale;
+  return `<div class="crud-actions">
+    <button class="btn btn-sm btn-outline-secondary" type="button" data-action="edit-entity" data-entity="${entity}" data-id="${recordId}" title="${t(locale, 'actions.edit')}" aria-label="${t(locale, 'actions.edit')}"><i class="bi bi-pencil"></i></button>
+    <button class="btn btn-sm btn-outline-danger" type="button" data-action="delete-entity" data-entity="${entity}" data-id="${recordId}" title="${t(locale, 'actions.delete')}" aria-label="${t(locale, 'actions.delete')}"><i class="bi bi-trash"></i></button>
+  </div>`;
+}
+
+function renderCrudSection(entity, data, config) {
+  const records = data[entity];
+  const rows = records.map((record) => `<tr>${config.columns.map((column) => `<td>${column.render(record)}</td>`).join('')}<td>${renderEntityActions(entity, record.id)}</td></tr>`).join('');
+  const table = records.length
+    ? `<div class="table-responsive"><table class="table align-middle"><thead><tr>${config.columns.map((column) => `<th>${column.label}</th>`).join('')}<th class="crud-actions-heading">${appState.locale === 'ar' ? 'الإجراءات' : 'Actions'}</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    : emptyState(appState.locale === 'ar' ? 'لا توجد بيانات' : 'Aucune donnée');
+  const addButton = `<button class="btn btn-primary" type="button" data-action="create-entity" data-entity="${entity}"><i class="bi bi-plus-lg"></i>${t(appState.locale, 'actions.add')}</button>`;
+  return `${section(config.title, table, addButton)}${renderEntityModal(entity, config)}`;
 }
 
 function emptyState(text) {
@@ -946,7 +1193,7 @@ function renderLogin(locale) {
       </section>
       <aside class="demo-panel">
         <div class="login-brand-copy">
-          <div class="brand-mark">UF</div>
+          <img class="brand-logo login-logo" src="./assets/wisig-logo.png" alt="WISIG">
           <h1>${t(locale, 'app.name')}</h1>
           <p>${locale === 'ar' ? 'واجهة جامعية محلية بثلاثة أدوار ونموذج بيانات بسيط.' : 'Application locale de gestion universitaire avec trois rôles et modèle de données relationnel simple.'}</p>
         </div>
@@ -972,7 +1219,7 @@ function renderShell(content) {
     <div class="app-shell" dir="${direction}">
       <aside class="sidebar">
         <a href="#/dashboard" class="shell-brand">
-          <span class="brand-mark small">UF</span>
+          <span class="sidebar-logo-frame"><img class="brand-logo sidebar-logo" src="./assets/wisig-logo.png" alt="WISIG"></span>
           <span><strong>${t(locale, 'app.name')}</strong><small>${t(locale, 'app.subtitle')}</small></span>
         </a>
         <nav class="shell-nav">${shellNav(user, locale)}</nav>
@@ -1053,71 +1300,249 @@ function renderActivity(logs, locale) {
     </div>`;
 }
 
-function renderStudents(data) {
+function getAdminEntityConfig(entity, data) {
   const { locale } = appState;
-  const rows = data.students.map((student) => `<tr>
-    <td><strong>${personName(student, locale)}</strong><div class="muted">${student.registrationNumber}</div></td>
-    <td>${escapeHtml(localName(byId(data.filieres, student.filiereId), locale))}</td>
-    <td>${escapeHtml(localName(byId(data.semesters, student.currentSemesterId), locale, 'label'))}</td>
-    <td>${escapeHtml(student.email)}</td>
-    <td>${badge(t(locale, `status.${student.status}`), student.status === 'active' ? 'success' : 'secondary')}</td>
-    <td><button class="btn btn-sm btn-outline-secondary" data-action="archive-student" data-id="${student.id}"><i class="bi bi-archive"></i></button></td>
-  </tr>`).join('');
-  return `
-    ${section(
-      t(locale, 'nav.students'),
-      `<div class="table-toolbar"><input class="form-control" data-filter-table="studentsTable" placeholder="${t(locale, 'actions.search')}"></div>
-       <div class="table-responsive"><table class="table align-middle searchable-table" id="studentsTable"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'السداسي' : 'Semestre'}</th><th>Email</th><th>${locale === 'ar' ? 'الحالة' : 'Statut'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`,
-      `<button class="btn btn-primary" data-action="open-modal" data-target="createStudentModal"><i class="bi bi-plus-lg"></i>${t(locale, 'actions.add')}</button>`
-    )}
-    ${renderStudentForm(data, locale)}`;
+  const label = (fr, ar) => locale === 'ar' ? ar : fr;
+  const statusField = {
+    name: 'status',
+    label: label('Statut', 'الحالة'),
+    type: 'select',
+    required: true,
+    options: [
+      { value: 'active', label: t(locale, 'status.active') },
+      { value: 'archived', label: t(locale, 'status.archived') }
+    ]
+  };
+  const filiereItems = selectItems(data.filieres, (item) => `${item.code} · ${localName(item, locale)}`);
+  const semesterItems = selectItems(
+    data.semesters,
+    (item) => `${byId(data.filieres, item.filiereId)?.code ?? '—'} · ${item.code}`,
+    (item) => ({ filiereId: item.filiereId })
+  );
+  const subjectItems = selectItems(
+    data.subjects,
+    (item) => `${item.code} · ${localName(item, locale)}`,
+    (item) => ({ filiereId: item.filiereId, semesterId: item.semesterId })
+  );
+  const teacherItems = selectItems(data.teachers, (item) => `${item.employeeNumber} · ${personName(item, locale)}`);
+  const studentItems = selectItems(
+    data.students,
+    (item) => `${item.registrationNumber} · ${personName(item, locale)}`,
+    (item) => ({ filiereId: item.filiereId, semesterId: item.currentSemesterId })
+  );
+  const personFields = [
+    { name: 'firstNameFr', label: label('Prénom FR', 'الاسم بالفرنسية'), required: true },
+    { name: 'lastNameFr', label: label('Nom FR', 'النسب بالفرنسية'), required: true },
+    { name: 'firstNameAr', label: label('الاسم', 'الاسم'), required: true },
+    { name: 'lastNameAr', label: label('النسب', 'النسب'), required: true },
+    { name: 'email', label: 'Email', type: 'email', required: true },
+    { name: 'phone', label: label('Téléphone', 'الهاتف'), type: 'tel', required: true }
+  ];
+  const configs = {
+    students: {
+      title: t(locale, 'nav.students'),
+      labels: crudLabels(locale, 'un étudiant', 'طالب'),
+      fields: [
+        { name: 'registrationNumber', label: label('N° inscription', 'رقم التسجيل'), required: true, wide: true },
+        ...personFields,
+        { name: 'birthDate', label: label('Date de naissance', 'تاريخ الازدياد'), type: 'date', required: true },
+        { name: 'filiereId', label: label('Filière', 'المسلك'), type: 'select', options: filiereItems, required: true },
+        { name: 'currentSemesterId', label: label('Semestre actuel', 'السداسي الحالي'), type: 'select', options: semesterItems, required: true },
+        statusField
+      ],
+      columns: [
+        { label: label('Étudiant', 'الطالب'), render: (item) => `<strong>${personName(item, locale)}</strong><div class="muted">${escapeHtml(item.registrationNumber)}</div>` },
+        { label: label('Filière', 'المسلك'), render: (item) => escapeHtml(localName(byId(data.filieres, item.filiereId), locale)) },
+        { label: label('Semestre', 'السداسي'), render: (item) => escapeHtml(byId(data.semesters, item.currentSemesterId)?.code ?? '—') },
+        { label: 'Email', render: (item) => escapeHtml(item.email) },
+        { label: label('Statut', 'الحالة'), render: (item) => badge(t(locale, `status.${item.status}`), item.status === 'active' ? 'success' : 'secondary') }
+      ]
+    },
+    teachers: {
+      title: t(locale, 'nav.teachers'),
+      labels: crudLabels(locale, 'un enseignant', 'أستاذ'),
+      fields: [
+        { name: 'employeeNumber', label: label('Matricule', 'رقم التأجير'), required: true, wide: true },
+        ...personFields,
+        { name: 'speciality', label: label('Spécialité', 'التخصص'), required: true },
+        { name: 'rank', label: label('Grade', 'الرتبة'), required: true },
+        statusField
+      ],
+      columns: [
+        { label: label('Enseignant', 'الأستاذ'), render: (item) => `<strong>${personName(item, locale)}</strong><div class="muted">${escapeHtml(item.employeeNumber)}</div>` },
+        { label: label('Spécialité', 'التخصص'), render: (item) => escapeHtml(item.speciality) },
+        { label: label('Grade', 'الرتبة'), render: (item) => escapeHtml(item.rank) },
+        { label: 'Email', render: (item) => escapeHtml(item.email) },
+        { label: label('Matières', 'المواد'), render: (item) => data.teacherAssignments.filter((assignment) => assignment.teacherId === item.id).length }
+      ]
+    },
+    filieres: {
+      title: label('Filières', 'المسالك'),
+      labels: crudLabels(locale, 'une filière', 'مسلك'),
+      fields: [
+        { name: 'code', label: label('Code', 'الرمز'), required: true },
+        { name: 'nameFr', label: label('Nom FR', 'الاسم بالفرنسية'), required: true },
+        { name: 'nameAr', label: label('Nom AR', 'الاسم بالعربية'), required: true },
+        { name: 'department', label: label('Département', 'القسم'), required: true },
+        { name: 'degreeType', label: label('Diplôme', 'الدبلوم'), required: true },
+        { name: 'durationSemesters', label: label('Nombre de semestres', 'عدد السداسيات'), type: 'number', min: 1, max: 12, required: true },
+        statusField
+      ],
+      columns: [
+        { label: label('Filière', 'المسلك'), render: (item) => `<strong>${localName(item, locale)}</strong><div class="muted">${escapeHtml(item.code)}</div>` },
+        { label: label('Département', 'القسم'), render: (item) => escapeHtml(item.department) },
+        { label: label('Diplôme', 'الدبلوم'), render: (item) => escapeHtml(item.degreeType) },
+        { label: label('Semestres', 'السداسيات'), render: (item) => item.durationSemesters },
+        { label: label('Statut', 'الحالة'), render: (item) => badge(t(locale, `status.${item.status}`), item.status === 'active' ? 'success' : 'secondary') }
+      ]
+    },
+    semesters: {
+      title: label('Semestres', 'السداسيات'),
+      labels: crudLabels(locale, 'un semestre', 'سداسي'),
+      fields: [
+        { name: 'filiereId', label: label('Filière', 'المسلك'), type: 'select', options: filiereItems, required: true },
+        { name: 'code', label: label('Code', 'الرمز'), placeholder: 'S1', required: true },
+        { name: 'labelFr', label: label('Libellé FR', 'التسمية بالفرنسية'), required: true },
+        { name: 'labelAr', label: label('Libellé AR', 'التسمية بالعربية'), required: true },
+        { name: 'order', label: label('Ordre', 'الترتيب'), type: 'number', min: 1, max: 12, required: true },
+        { name: 'startDate', label: label('Date de début', 'تاريخ البداية'), type: 'date', required: true },
+        { name: 'endDate', label: label('Date de fin', 'تاريخ النهاية'), type: 'date', required: true },
+        statusField
+      ],
+      columns: [
+        { label: label('Filière', 'المسلك'), render: (item) => escapeHtml(localName(byId(data.filieres, item.filiereId), locale)) },
+        { label: label('Semestre', 'السداسي'), render: (item) => `<strong>${escapeHtml(item.code)}</strong><div class="muted">${escapeHtml(localName(item, locale, 'label'))}</div>` },
+        { label: label('Période', 'الفترة'), render: (item) => `${formatDate(locale, item.startDate)} – ${formatDate(locale, item.endDate)}` },
+        { label: label('Statut', 'الحالة'), render: (item) => badge(t(locale, `status.${item.status}`), item.status === 'active' ? 'success' : 'secondary') }
+      ]
+    },
+    subjects: {
+      title: label('Matières', 'المواد'),
+      labels: crudLabels(locale, 'une matière', 'مادة'),
+      fields: [
+        { name: 'filiereId', label: label('Filière', 'المسلك'), type: 'select', options: filiereItems, required: true },
+        { name: 'semesterId', label: label('Semestre', 'السداسي'), type: 'select', options: semesterItems, required: true },
+        { name: 'code', label: label('Code', 'الرمز'), required: true },
+        { name: 'nameFr', label: label('Nom FR', 'الاسم بالفرنسية'), required: true },
+        { name: 'nameAr', label: label('Nom AR', 'الاسم بالعربية'), required: true },
+        { name: 'coefficient', label: label('Coefficient', 'المعامل'), type: 'number', min: 0.5, max: 20, step: 0.5, required: true },
+        { name: 'hours', label: label('Volume horaire', 'الحجم الساعي'), type: 'number', min: 1, required: true },
+        statusField
+      ],
+      columns: [
+        { label: label('Matière', 'المادة'), render: (item) => `<strong>${localName(item, locale)}</strong><div class="muted">${escapeHtml(item.code)}</div>` },
+        { label: label('Filière', 'المسلك'), render: (item) => escapeHtml(localName(byId(data.filieres, item.filiereId), locale)) },
+        { label: label('Semestre', 'السداسي'), render: (item) => escapeHtml(byId(data.semesters, item.semesterId)?.code ?? '—') },
+        { label: label('Coefficient', 'المعامل'), render: (item) => item.coefficient },
+        { label: label('Heures', 'الساعات'), render: (item) => `${item.hours}h` }
+      ]
+    },
+    teacherAssignments: {
+      title: label('Affectations pédagogiques', 'التكليفات التربوية'),
+      labels: crudLabels(locale, 'une affectation', 'تكليف'),
+      fields: [
+        { name: 'filiereId', label: label('Filière', 'المسلك'), type: 'select', options: filiereItems, required: true },
+        { name: 'semesterId', label: label('Semestre', 'السداسي'), type: 'select', options: semesterItems, required: true },
+        { name: 'subjectId', label: label('Matière', 'المادة'), type: 'select', options: subjectItems, required: true },
+        { name: 'teacherId', label: label('Enseignant', 'الأستاذ'), type: 'select', options: teacherItems, required: true },
+        { name: 'academicYear', label: label('Année universitaire', 'السنة الجامعية'), placeholder: '2026-2027', required: true },
+        statusField
+      ],
+      columns: [
+        { label: label('Matière', 'المادة'), render: (item) => escapeHtml(localName(byId(data.subjects, item.subjectId), locale)) },
+        { label: label('Enseignant', 'الأستاذ'), render: (item) => escapeHtml(personName(byId(data.teachers, item.teacherId), locale)) },
+        { label: label('Contexte', 'السياق'), render: (item) => `${escapeHtml(byId(data.filieres, item.filiereId)?.code ?? '—')} · ${escapeHtml(byId(data.semesters, item.semesterId)?.code ?? '—')}` },
+        { label: label('Année', 'السنة'), render: (item) => escapeHtml(item.academicYear) },
+        { label: label('Statut', 'الحالة'), render: (item) => badge(t(locale, `status.${item.status}`), item.status === 'active' ? 'success' : 'secondary') }
+      ]
+    },
+    timetableEntries: {
+      title: t(locale, 'nav.timetable'),
+      labels: crudLabels(locale, 'une séance', 'حصة'),
+      fields: [
+        { name: 'filiereId', label: label('Filière', 'المسلك'), type: 'select', options: filiereItems, required: true },
+        { name: 'semesterId', label: label('Semestre', 'السداسي'), type: 'select', options: semesterItems, required: true },
+        { name: 'subjectId', label: label('Matière', 'المادة'), type: 'select', options: subjectItems, required: true },
+        { name: 'teacherId', label: label('Enseignant', 'الأستاذ'), type: 'select', options: teacherItems, required: true },
+        { name: 'weekday', label: label('Jour', 'اليوم'), type: 'select', required: true, options: [1, 2, 3, 4, 5, 6].map((day) => ({ value: day, label: locale === 'ar' ? weekdayKeysAr[day] : weekdayKeys[day] })) },
+        { name: 'startTime', label: label('Heure de début', 'وقت البداية'), type: 'time', required: true },
+        { name: 'endTime', label: label('Heure de fin', 'وقت النهاية'), type: 'time', required: true },
+        statusField
+      ],
+      columns: [
+        { label: label('Jour', 'اليوم'), render: (item) => escapeHtml(locale === 'ar' ? weekdayKeysAr[item.weekday] : weekdayKeys[item.weekday]) },
+        { label: label('Horaire', 'التوقيت'), render: (item) => `${escapeHtml(item.startTime)} – ${escapeHtml(item.endTime)}` },
+        { label: label('Matière', 'المادة'), render: (item) => escapeHtml(localName(byId(data.subjects, item.subjectId), locale)) },
+        { label: label('Enseignant', 'الأستاذ'), render: (item) => escapeHtml(personName(byId(data.teachers, item.teacherId), locale)) },
+        { label: label('Contexte', 'السياق'), render: (item) => `${escapeHtml(byId(data.filieres, item.filiereId)?.code ?? '—')} · ${escapeHtml(byId(data.semesters, item.semesterId)?.code ?? '—')}` }
+      ]
+    },
+    grades: {
+      title: t(locale, 'nav.grades'),
+      labels: crudLabels(locale, 'une note', 'نقطة'),
+      fields: [
+        { name: 'studentId', label: label('Étudiant', 'الطالب'), type: 'select', options: studentItems, required: true, wide: true },
+        { name: 'semesterId', label: label('Semestre', 'السداسي'), type: 'select', options: semesterItems, required: true },
+        { name: 'subjectId', label: label('Matière', 'المادة'), type: 'select', options: subjectItems, required: true },
+        { name: 'teacherId', label: label('Enseignant', 'الأستاذ'), type: 'select', options: teacherItems, required: true },
+        { name: 'mark', label: label('Note /20', 'النقطة /20'), type: 'number', min: 0, max: 20, step: 0.25, required: true },
+        { name: 'appreciation', label: label('Appréciation', 'التقدير'), required: true },
+        { name: 'published', label: label('Publication', 'النشر'), type: 'select', required: true, options: [{ value: 'true', label: label('Publiée', 'منشورة') }, { value: 'false', label: label('Brouillon', 'مسودة') }] },
+        statusField
+      ],
+      columns: [
+        { label: label('Étudiant', 'الطالب'), render: (item) => escapeHtml(personName(byId(data.students, item.studentId), locale)) },
+        { label: label('Matière', 'المادة'), render: (item) => escapeHtml(localName(byId(data.subjects, item.subjectId), locale)) },
+        { label: label('Semestre', 'السداسي'), render: (item) => escapeHtml(byId(data.semesters, item.semesterId)?.code ?? '—') },
+        { label: label('Note /20', 'النقطة /20'), render: (item) => `<strong>${item.mark}/20</strong>` },
+        { label: label('Appréciation', 'التقدير'), render: (item) => escapeHtml(item.appreciation) },
+        { label: label('Enseignant', 'الأستاذ'), render: (item) => escapeHtml(personName(byId(data.teachers, item.teacherId), locale)) }
+      ]
+    },
+    users: {
+      title: t(locale, 'nav.users'),
+      labels: crudLabels(locale, 'un utilisateur', 'مستخدم'),
+      fields: [
+        { name: 'displayName', label: label('Nom affiché', 'الاسم المعروض'), required: true },
+        { name: 'email', label: 'Email', type: 'email', required: true },
+        { name: 'password', label: label('Mot de passe', 'كلمة المرور'), type: 'text', required: true },
+        { name: 'role', label: label('Rôle', 'الدور'), type: 'select', required: true, options: ['admin', 'teacher', 'student'].map((role) => ({ value: role, label: t(locale, `roles.${role}`) })) },
+        { name: 'linkedProfileId', label: label('Profil lié', 'الملف المرتبط'), type: 'select', allowBlank: true, options: [
+          ...studentItems.map((item) => ({ ...item, label: `${t(locale, 'roles.student')} · ${item.label}`, metadata: { role: 'student' } })),
+          ...teacherItems.map((item) => ({ ...item, label: `${t(locale, 'roles.teacher')} · ${item.label}`, metadata: { role: 'teacher' } }))
+        ] },
+        { name: 'locale', label: label('Langue', 'اللغة'), type: 'select', required: true, options: [{ value: 'fr', label: 'Français' }, { value: 'ar', label: 'العربية' }] },
+        { name: 'avatar', label: label('Initiales', 'الأحرف'), required: true },
+        statusField
+      ],
+      columns: [
+        { label: label('Utilisateur', 'المستخدم'), render: (item) => `<strong>${escapeHtml(item.displayName)}</strong><div class="muted">${escapeHtml(item.avatar)}</div>` },
+        { label: 'Email', render: (item) => escapeHtml(item.email) },
+        { label: label('Rôle', 'الدور'), render: (item) => escapeHtml(t(locale, `roles.${item.role}`)) },
+        { label: label('Langue', 'اللغة'), render: (item) => escapeHtml(item.locale.toUpperCase()) },
+        { label: label('Statut', 'الحالة'), render: (item) => badge(t(locale, `status.${item.status}`), item.status === 'active' ? 'success' : 'secondary') }
+      ]
+    }
+  };
+  return configs[entity];
 }
 
-function renderStudentForm(data, locale) {
-  const fields = `
-    ${formField(locale === 'ar' ? 'رقم التسجيل' : 'N° inscription', '<input class="form-control" name="registrationNumber" placeholder="UNI-2026-100" required>', 'form-field-wide')}
-    ${formField(locale === 'ar' ? 'الاسم بالفرنسية' : 'Prénom FR', '<input class="form-control" name="firstNameFr" placeholder="Mina" required>')}
-    ${formField(locale === 'ar' ? 'النسب بالفرنسية' : 'Nom FR', '<input class="form-control" name="lastNameFr" placeholder="El Fassi" required>')}
-    ${formField(locale === 'ar' ? 'الاسم بالعربية' : 'الاسم', '<input class="form-control" name="firstNameAr" placeholder="مينة" required>')}
-    ${formField(locale === 'ar' ? 'النسب بالعربية' : 'النسب', '<input class="form-control" name="lastNameAr" placeholder="الفاسي" required>')}
-    ${formField('Email', '<input class="form-control" name="email" placeholder="email@example.test" type="email" required>')}
-    ${formField(locale === 'ar' ? 'الهاتف' : 'Téléphone', '<input class="form-control" name="phone" placeholder="+212..." required>')}
-    ${formField(locale === 'ar' ? 'تاريخ الازدياد' : 'Date de naissance', '<input class="form-control" name="birthDate" type="date" required>')}
-    ${formField(locale === 'ar' ? 'المسلك' : 'Filière', `<select class="form-select" name="filiereId">${optionTags(data.filieres, 'fil-gi', locale)}</select>`)}
-    ${formField(locale === 'ar' ? 'السداسي الحالي' : 'Semestre actuel', `<select class="form-select" name="currentSemesterId">${optionTags(data.semesters, 'sem-gi-s3', locale, 'label')}</select>`)}
-  `;
-  return renderFormModal({
-    id: 'createStudentModal',
-    title: locale === 'ar' ? 'إضافة طالب' : 'Ajouter un étudiant',
-    formId: 'studentForm',
-    fields,
-    submitLabel: t(locale, 'actions.save')
-  });
+function renderStudents(data) {
+  return renderCrudSection('students', data, getAdminEntityConfig('students', data));
 }
 
 function renderTeachers(data) {
-  const { locale } = appState;
-  const rows = data.teachers.map((teacher) => {
-    const assignmentCount = data.teacherAssignments.filter((assignment) => assignment.teacherId === teacher.id).length;
-    return `<tr><td><strong>${personName(teacher, locale)}</strong><div class="muted">${teacher.employeeNumber}</div></td><td>${escapeHtml(teacher.speciality)}</td><td>${escapeHtml(teacher.rank)}</td><td>${escapeHtml(teacher.email)}</td><td>${assignmentCount}</td></tr>`;
-  }).join('');
-  return section(t(locale, 'nav.teachers'), `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th><th>${locale === 'ar' ? 'التخصص' : 'Spécialité'}</th><th>${locale === 'ar' ? 'الرتبة' : 'Grade'}</th><th>Email</th><th>${locale === 'ar' ? 'مواد' : 'Matières'}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+  return renderCrudSection('teachers', data, getAdminEntityConfig('teachers', data));
 }
 
 function renderSchool(data) {
   const { locale } = appState;
   const schemaRows = Object.entries(DATABASE_TABLES).map(([table, columns]) => `<tr><td><strong>${table}</strong></td><td><code>${columns.join('</code>, <code>')}</code></td></tr>`).join('');
-  const filiereCards = data.filieres.map((filiere) => {
-    const semesters = data.semesters.filter((semester) => semester.filiereId === filiere.id);
-    return `<div class="split-row"><span><strong>${localName(filiere, locale)}</strong><small>${semesters.map((semester) => `${semester.code}: ${data.subjects.filter((subject) => subject.semesterId === semester.id).length} matières`).join(' · ')}</small></span><span>${filiere.code}</span></div>`;
-  }).join('');
-  const subjectRows = data.subjects.map((subject) => {
-    const assignment = data.teacherAssignments.find((item) => item.subjectId === subject.id);
-    return `<tr><td>${localName(byId(data.filieres, subject.filiereId), locale)}</td><td>${byId(data.semesters, subject.semesterId)?.code}</td><td><strong>${localName(subject, locale)}</strong><div class="muted">${subject.code}</div></td><td>${personName(byId(data.teachers, assignment?.teacherId), locale)}</td><td>${subject.coefficient}</td><td>${subject.hours}h</td></tr>`;
-  }).join('');
   return `
-    ${section(locale === 'ar' ? 'المسالك والسداسيات' : 'Filières et semestres', `<div class="split-list">${filiereCards}</div>`)}
-    ${section(locale === 'ar' ? 'المواد والأساتذة' : 'Matières et enseignants', `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'السداسي' : 'Semestre'}</th><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th><th>Coef.</th><th>Heures</th></tr></thead><tbody>${subjectRows}</tbody></table></div>`)}
+    ${renderCrudSection('filieres', data, getAdminEntityConfig('filieres', data))}
+    ${renderCrudSection('semesters', data, getAdminEntityConfig('semesters', data))}
+    ${renderCrudSection('subjects', data, getAdminEntityConfig('subjects', data))}
+    ${renderCrudSection('teacherAssignments', data, getAdminEntityConfig('teacherAssignments', data))}
     ${section(locale === 'ar' ? 'تصميم قاعدة البيانات' : 'Conception relationnelle des données', `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Table</th><th>Colonnes</th></tr></thead><tbody>${schemaRows}</tbody></table></div>`)}
   `;
 }
@@ -1128,8 +1553,7 @@ function renderTimetableTable(rows, locale) {
 }
 
 async function renderTimetable(data) {
-  const rows = await appState.schedule.getTimetable();
-  return section(t(appState.locale, 'nav.timetable'), renderTimetableTable(rows, appState.locale));
+  return renderCrudSection('timetableEntries', data, getAdminEntityConfig('timetableEntries', data));
 }
 
 function renderTeacherSubjects(assignments, locale) {
@@ -1143,13 +1567,7 @@ async function renderTeacherSubjectsPage(data) {
 }
 
 function renderGradesOverview(data) {
-  const { locale } = appState;
-  const rows = data.grades.map((grade) => {
-    const student = byId(data.students, grade.studentId);
-    const subject = byId(data.subjects, grade.subjectId);
-    return `<tr><td><strong>${personName(student, locale)}</strong><div class="muted">${student.registrationNumber}</div></td><td>${localName(byId(data.filieres, student.filiereId), locale)}</td><td>${byId(data.semesters, grade.semesterId)?.code}</td><td>${localName(subject, locale)}</td><td data-grade-mark-student="${student.id}">${grade.mark}/20</td><td data-grade-appreciation-student="${student.id}">${escapeHtml(grade.appreciation)}</td><td>${personName(byId(data.teachers, grade.teacherId), locale)}</td></tr>`;
-  }).join('');
-  return section(t(locale, 'nav.grades'), `<div class="table-responsive"><table class="table align-middle grades-overview-table"><thead><tr><th>${locale === 'ar' ? 'الطالب' : 'Étudiant'}</th><th>${locale === 'ar' ? 'المسلك' : 'Filière'}</th><th>${locale === 'ar' ? 'السداسي' : 'Semestre'}</th><th>${locale === 'ar' ? 'المادة' : 'Matière'}</th><th>${locale === 'ar' ? 'النقطة /20' : 'Note /20'}</th><th>${locale === 'ar' ? 'التقدير' : 'Appréciation'}</th><th>${locale === 'ar' ? 'الأستاذ' : 'Enseignant'}</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+  return renderCrudSection('grades', data, getAdminEntityConfig('grades', data));
 }
 
 function renderGradebook(data) {
@@ -1194,8 +1612,7 @@ async function renderTranscript(data) {
 }
 
 function renderUsers(data) {
-  const { locale } = appState;
-  return section(t(locale, 'nav.users'), `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>${locale === 'ar' ? 'المستخدم' : 'Utilisateur'}</th><th>Email</th><th>${locale === 'ar' ? 'الدور' : 'Rôle'}</th><th>${locale === 'ar' ? 'اللغة' : 'Langue'}</th></tr></thead><tbody>${data.users.map((user) => `<tr><td>${escapeHtml(user.displayName)}</td><td>${escapeHtml(user.email)}</td><td>${t(locale, `roles.${user.role}`)}</td><td>${user.locale.toUpperCase()}</td></tr>`).join('')}</tbody></table></div>`);
+  return renderCrudSection('users', data, getAdminEntityConfig('users', data));
 }
 
 function renderSettings(locale) {
@@ -1388,11 +1805,12 @@ async function handleSubmit(event) {
       showInlineError(form, t(appState.locale, 'validation.invalidCredentials'));
     }
   }
-  if (form.id === 'studentForm') {
+  if (form.matches('[data-crud-entity]')) {
     event.preventDefault();
+    if (appState.user?.role !== 'admin') return;
     const payload = Object.fromEntries(new FormData(form).entries());
     try {
-      await appState.academic.createStudent(payload);
+      await appState.academic.saveEntity(form.dataset.crudEntity, form.dataset.recordId || null, payload, appState.user.id);
       showToast(t(appState.locale, 'toast.saved'));
       closeModal(form.closest('.modal'));
       await renderRoute();
@@ -1425,6 +1843,70 @@ function showInlineError(form, message) {
   form.insertAdjacentHTML('afterbegin', `<div class="alert alert-danger">${escapeHtml(message)}</div>`);
 }
 
+function setCrudFormRecord(form, record = null) {
+  form.reset();
+  form.querySelector('.alert')?.remove();
+  form.dataset.recordId = record?.id ?? '';
+  form.closest('.modal')?.querySelector('[data-modal-title]')?.replaceChildren(
+    record ? form.dataset.editTitle : form.dataset.createTitle
+  );
+  if (!record) return;
+  for (const [name, value] of Object.entries(record)) {
+    const field = form.elements.namedItem(name);
+    if (field) field.value = value === null || value === undefined ? '' : String(value);
+  }
+}
+
+function keepValidSelection(select) {
+  if (!select) return;
+  const current = select.selectedOptions[0];
+  if (!current || current.disabled) {
+    select.value = [...select.options].find((option) => !option.disabled)?.value ?? '';
+  }
+}
+
+function filterSelectOptions(select, predicate) {
+  if (!select) return;
+  for (const option of select.options) {
+    const visible = option.value === '' || predicate(option);
+    option.disabled = !visible;
+    option.hidden = !visible;
+  }
+  keepValidSelection(select);
+}
+
+async function syncRelationalFields(form) {
+  const data = await loadData();
+  const student = form.elements.studentId ? byId(data.students, form.elements.studentId.value) : null;
+  const filiereId = form.elements.filiereId?.value || student?.filiereId || '';
+
+  for (const name of ['semesterId', 'currentSemesterId']) {
+    const select = form.elements[name];
+    filterSelectOptions(select, (option) => !filiereId || option.dataset.filiereId === filiereId);
+  }
+  if (student && form.elements.semesterId) form.elements.semesterId.value = student.currentSemesterId;
+
+  const semesterId = form.elements.semesterId?.value || form.elements.currentSemesterId?.value || student?.currentSemesterId || '';
+  filterSelectOptions(form.elements.subjectId, (option) => (
+    (!filiereId || option.dataset.filiereId === filiereId)
+    && (!semesterId || option.dataset.semesterId === semesterId)
+  ));
+
+  if (form.elements.teacherId && ['timetableEntries', 'grades'].includes(form.dataset.crudEntity)) {
+    const subjectId = form.elements.subjectId?.value;
+    const teacherIds = new Set(data.teacherAssignments
+      .filter((assignment) => assignment.subjectId === subjectId && assignment.semesterId === semesterId)
+      .map((assignment) => assignment.teacherId));
+    filterSelectOptions(form.elements.teacherId, (option) => teacherIds.has(option.value));
+  }
+
+  if (form.dataset.crudEntity === 'users') {
+    const role = form.elements.role.value;
+    filterSelectOptions(form.elements.linkedProfileId, (option) => option.dataset.role === role);
+    if (role === 'admin') form.elements.linkedProfileId.value = '';
+  }
+}
+
 async function handleClick(event) {
   const target = event.target.closest('[data-action], [data-demo-email]');
   if (!target) return;
@@ -1452,10 +1934,33 @@ async function handleClick(event) {
   if (action === 'close-modal') {
     closeModal(document.getElementById(target.dataset.target));
   }
-  if (action === 'archive-student') {
-    await appState.repositories.students.archive(target.dataset.id);
-    showToast(t(appState.locale, 'toast.saved'));
-    await renderRoute();
+  if (action === 'create-entity' && appState.user?.role === 'admin') {
+    const form = document.getElementById(`${target.dataset.entity}Form`);
+    setCrudFormRecord(form);
+    await syncRelationalFields(form);
+    openModal(form.closest('.modal'));
+  }
+  if (action === 'edit-entity' && appState.user?.role === 'admin') {
+    const entity = target.dataset.entity;
+    const form = document.getElementById(`${entity}Form`);
+    const record = await appState.repositories[entity].getById(target.dataset.id);
+    setCrudFormRecord(form, record);
+    await syncRelationalFields(form);
+    openModal(form.closest('.modal'));
+  }
+  if (action === 'delete-entity' && appState.user?.role === 'admin') {
+    const message = appState.locale === 'ar'
+      ? 'حذف هذا السجل وكل البيانات المرتبطة به نهائياً؟'
+      : 'Supprimer définitivement cet élément et toutes ses données liées ?';
+    if (confirm(message)) {
+      try {
+        await appState.academic.removeEntity(target.dataset.entity, target.dataset.id, appState.user.id);
+        showToast(t(appState.locale, 'toast.saved'));
+        await renderRoute();
+      } catch (error) {
+        showToast(error.message, 'danger');
+      }
+    }
   }
   if (action === 'print') {
     window.print();
@@ -1472,6 +1977,10 @@ async function handleClick(event) {
 
 async function handleChange(event) {
   const target = event.target;
+  const crudForm = target.closest('[data-crud-entity]');
+  if (crudForm && ['filiereId', 'currentSemesterId', 'semesterId', 'studentId', 'subjectId', 'role'].includes(target.name)) {
+    await syncRelationalFields(crudForm);
+  }
   if (target.matches('[data-action="import-json"]')) {
     const file = target.files[0];
     if (!file) return;

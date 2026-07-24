@@ -139,21 +139,35 @@ textarea {
   opacity: .72;
 }
 
-.brand-mark {
-  width: 64px;
-  height: 64px;
-  border-radius: var(--uf-radius);
-  display: grid;
-  place-items: center;
-  background: var(--uf-gold);
-  color: var(--uf-navy);
-  font-weight: 800;
+.brand-logo {
+  display: block;
+  object-fit: contain;
 }
 
-.brand-mark.small {
-  width: 40px;
-  height: 40px;
-  flex: 0 0 40px;
+.login-logo {
+  aspect-ratio: 1;
+  background: white;
+  border-radius: 18px;
+  box-shadow: 0 18px 45px rgba(5, 25, 48, .18);
+  height: auto;
+  margin-bottom: 1.25rem;
+  max-width: 100%;
+  width: 220px;
+}
+
+.sidebar-logo-frame {
+  background: white;
+  border-radius: 10px;
+  flex: 0 0 54px;
+  height: 54px;
+  overflow: hidden;
+  width: 54px;
+}
+
+.sidebar-logo {
+  height: 100%;
+  transform: scale(1.18) translateY(-3%);
+  width: 100%;
 }
 
 .app-shell {
@@ -378,6 +392,27 @@ textarea {
   text-transform: uppercase;
 }
 
+.crud-actions {
+  display: flex;
+  gap: .4rem;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.crud-actions .btn {
+  align-items: center;
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+  width: 34px;
+}
+
+.crud-actions-heading {
+  text-align: end;
+  width: 86px;
+}
+
 .chart-frame {
   position: relative;
   height: 320px;
@@ -396,32 +431,10 @@ textarea {
   height: 100% !important;
 }
 
-.grades-overview-table th:nth-child(3),
-.grades-overview-table td:nth-child(3) {
-  width: 140px;
-  white-space: nowrap;
-}
-
-.grades-overview-table th:nth-child(4),
-.grades-overview-table td:nth-child(4) {
-  width: 180px;
-}
-
 .stack {
   display: grid;
   gap: .65rem;
   margin-top: 1.5rem;
-}
-
-.grid-form {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: .75rem;
-  align-items: end;
-}
-
-.grid-form .btn {
-  min-height: 38px;
 }
 
 .form-modal .modal-content {
@@ -684,10 +697,6 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .grid-form {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .user-chip {
     max-width: 150px;
     overflow: hidden;
@@ -728,7 +737,6 @@ textarea {
   }
 
   .metric-grid,
-  .grid-form,
   .form-modal-grid {
     grid-template-columns: 1fr;
   }
